@@ -8,7 +8,7 @@
         "build": "vite build",
         "typecheck": "tsc --noEmit",
         "test:media-adapters": "node --test scripts/media-channel-*.test.mjs",
-        "test:canvas-generation": "node --test scripts/canvas-generation-state.test.mjs scripts/async-task.test.mjs",
+        "test:canvas-generation": "node --test scripts/canvas-generation-state.test.mjs",
         "start": "vite preview --host 0.0.0.0 --port 3000",
         "format": "prettier --write .",
         "format:check": "prettier --check ."
