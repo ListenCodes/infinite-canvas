@@ -40,8 +40,8 @@ test("Grok2API image adapter sends JSON generation requests and resolves relativ
     const result = await runScript(GROK2API_IMAGE_ADAPTER_SCRIPT, {
         params: { count: 12, size: "1024x1024" },
         http: {
-            post: async (path, body) => {
-                calls.push({ path, body });
+            post: async (path, body, options) => {
+                calls.push({ path, body, options });
                 return { data: [{ url: "/v1/media/images/result.png" }] };
             },
         },
@@ -52,6 +52,7 @@ test("Grok2API image adapter sends JSON generation requests and resolves relativ
     assert.equal(calls[0].body.n, 10);
     assert.equal(calls[0].body.stream, false);
     assert.equal(calls[0].body.aspect_ratio, "1:1");
+    assert.equal(calls[0].options.timeoutMs, 300000);
 });
 
 test("image adapters preserve wide ratios and map high-resolution requests to 2k", async () => {

@@ -37,7 +37,7 @@ if (allowedSizes.includes(params.size)) body.size = params.size;
 if (aspectRatio) body.aspect_ratio = aspectRatio;
 if (editing) body.images = images.slice(0, 8).map((url) => ({ url }));
 
-const response = await http.post(editing ? "/images/edits" : "/images/generations", body);
+const response = await http.post(editing ? "/images/edits" : "/images/generations", body, { timeoutMs: 300000 });
 const root = response?.data && !Array.isArray(response.data) && (response.data.data || response.data.images || response.data.results) ? response.data : response;
 const items = root?.data || root?.images || root?.results || [];
 const urls = items.map((item) => {

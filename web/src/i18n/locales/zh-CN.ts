@@ -27,6 +27,8 @@ export default {
         durationMinutes: "{{minutes}}分{{seconds}}秒",
         durationSeconds: "{{seconds}}秒",
         imageReadFailed: "读取图片失败",
+        imageTimeout: "图片生成超时，请稍后重试",
+        imageStoreTimeout: "保存图片超时，请检查浏览器存储空间后重试",
     },
     settingsPanels: {
         common: { auto: "自动", low: "低", medium: "中", high: "高", xhigh: "极高" },

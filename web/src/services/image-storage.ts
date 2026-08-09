@@ -17,15 +17,62 @@ const store = localforage.createInstance({ name: "infinite-canvas", storeName: "
 const imageLogStore = localforage.createInstance({ name: "infinite-canvas", storeName: "image_generation_logs" });
 const videoLogStore = localforage.createInstance({ name: "infinite-canvas", storeName: "video_generation_logs" });
 const objectUrls = new Map<string, string>();
+const IMAGE_UPLOAD_TIMEOUT_MS = 30000;
 
-export async function uploadImage(input: string | Blob): Promise<UploadedImage> {
-    const blob = typeof input === "string" ? await (await fetch(input)).blob() : input;
+export async function uploadImage(input: string | Blob, options?: { signal?: AbortSignal; timeoutMs?: number }): Promise<UploadedImage> {
     const storageKey = `image:${nanoid()}`;
-    await store.setItem(storageKey, blob);
-    const url = URL.createObjectURL(blob);
-    objectUrls.set(storageKey, url);
-    const meta = await readImageMeta(url);
-    return { url, storageKey, width: meta.width, height: meta.height, bytes: blob.size, mimeType: blob.type || meta.mimeType };
+    const controller = new AbortController();
+    const abort = () => controller.abort(options?.signal?.reason);
+    if (options?.signal?.aborted) abort();
+    else options?.signal?.addEventListener("abort", abort, { once: true });
+    const timer = setTimeout(() => controller.abort(new DOMException("Image storage timed out", "TimeoutError")), options?.timeoutMs ?? IMAGE_UPLOAD_TIMEOUT_MS);
+    let url = "";
+    try {
+        throwIfAborted(controller.signal);
+        return await raceWithSignal(
+            (async () => {
+                const blob = typeof input === "string" ? await (await fetch(input, { signal: controller.signal })).blob() : input;
+                throwIfAborted(controller.signal);
+                await store.setItem(storageKey, blob);
+                if (controller.signal.aborted) {
+                    await store.removeItem(storageKey);
+                    throwAbortReason(controller.signal);
+                }
+                url = URL.createObjectURL(blob);
+                objectUrls.set(storageKey, url);
+                const meta = await readImageMeta(url);
+                throwIfAborted(controller.signal);
+                return { url, storageKey, width: meta.width, height: meta.height, bytes: blob.size, mimeType: blob.type || meta.mimeType };
+            })(),
+            controller.signal,
+        );
+    } catch (error) {
+        if (url) URL.revokeObjectURL(url);
+        objectUrls.delete(storageKey);
+        void store.removeItem(storageKey).catch(() => undefined);
+        if (controller.signal.reason instanceof DOMException && controller.signal.reason.name === "TimeoutError") throw new Error(i18n.t("common.imageStoreTimeout"));
+        throw error;
+    } finally {
+        clearTimeout(timer);
+        options?.signal?.removeEventListener("abort", abort);
+    }
+}
+
+function raceWithSignal<T>(promise: Promise<T>, signal: AbortSignal) {
+    if (signal.aborted) return Promise.reject(signal.reason || new DOMException("Aborted", "AbortError"));
+    return new Promise<T>((resolve, reject) => {
+        const abort = () => reject(signal.reason || new DOMException("Aborted", "AbortError"));
+        signal.addEventListener("abort", abort, { once: true });
+        promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+    });
+}
+
+function throwIfAborted(signal: AbortSignal) {
+    if (signal.aborted) throwAbortReason(signal);
+}
+
+function throwAbortReason(signal: AbortSignal): never {
+    throw signal.reason || new DOMException("Aborted", "AbortError");
 }
 
 export async function resolveImageUrl(storageKey?: string, fallback = "") {

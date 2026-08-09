@@ -27,6 +27,8 @@ export default {
         durationMinutes: "{{minutes}}m {{seconds}}s",
         durationSeconds: "{{seconds}}s",
         imageReadFailed: "Failed to read image",
+        imageTimeout: "Image generation timed out. Try again later.",
+        imageStoreTimeout: "Timed out while saving the image. Check browser storage and try again.",
     },
     settingsPanels: {
         common: { auto: "Auto", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high" },

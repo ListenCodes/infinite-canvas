@@ -9,6 +9,7 @@ export type PluginHttpOptions = {
     headers?: Record<string, string>;
     params?: Record<string, unknown>;
     responseType?: "json" | "blob" | "text" | "arraybuffer";
+    timeoutMs?: number;
 };
 
 export type PluginHttp = {
@@ -53,6 +54,7 @@ function createPluginHttp(config: AiConfig, options?: RequestOptions): PluginHtt
             headers: pluginHeaders({ Authorization: `Bearer ${config.apiKey}`, ...opts?.headers }, method === "post" && !isForm && body !== undefined),
             responseType: opts?.responseType || "json",
             signal: options?.signal,
+            timeout: opts?.timeoutMs,
         });
         return response.data;
     };
