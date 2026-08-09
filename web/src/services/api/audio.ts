@@ -3,7 +3,8 @@ import axios from "axios";
 import i18n from "@/i18n";
 import { audioMimeType, normalizeAudioFormatValue, normalizeAudioSpeedValue, normalizeAudioVoiceValue } from "@/lib/audio-generation";
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
-import { buildApiUrl, resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
+import { buildApiUrl, resolveModelRequestConfig, type AiConfig } from "@/stores/use-config-store";
+import { resolveModelRuntimeAdapter, resolveModelRuntimeScript } from "./media-channel-presets";
 import { runModelPlugin } from "./model-plugin";
 
 type RequestOptions = { signal?: AbortSignal };
@@ -21,10 +22,18 @@ function aiHeaders(config: AiConfig) {
 }
 
 export async function requestAudioGeneration(config: AiConfig, prompt: string, options?: RequestOptions): Promise<Blob> {
-    const requestConfig = resolveModelRequestConfig(config, config.model || config.audioModel);
+    const selectedModel = config.model || config.audioModel;
+    const requestConfig = resolveModelRequestConfig(config, selectedModel);
     const model = requestConfig.model.trim();
     const format = normalizeAudioFormatValue(config.audioFormat);
-    const script = resolveModelScript(config, config.model || config.audioModel);
+    const adapterProfile = resolveModelRuntimeAdapter(config, selectedModel);
+    if (adapterProfile !== "protocol" && adapterProfile !== "custom-script") {
+        throw new Error(i18n.t("modelAdapterErrors.mismatch"));
+    }
+    const script = resolveModelRuntimeScript(config, selectedModel, adapterProfile);
+    if (adapterProfile === "custom-script" && !script) {
+        throw new Error(i18n.t("modelAdapterErrors.customScriptMissing"));
+    }
     if (script) {
         if (!model) throw new Error(apiText("audioModelRequired"));
         if (!requestConfig.baseUrl.trim()) throw new Error(apiText("baseUrlRequired"));

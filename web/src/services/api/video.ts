@@ -6,9 +6,10 @@ import { dataUrlToFile } from "@/lib/image-utils";
 import { getMediaBlob, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
 import { boolConfig, buildSeedancePromptText, isSeedanceVideoConfig, normalizeSeedanceDuration, normalizeSeedanceRatio, normalizeSeedanceResolution, seedanceVideoReferenceError, SEEDANCE_REFERENCE_LIMITS } from "@/lib/seedance-video";
-import { buildApiUrl, findExactModelChannel, modelOptionName, resolveModelChannel, resolveModelRequestConfig, resolveModelScript, type AiConfig, type MediaChannelAdapter } from "@/stores/use-config-store";
+import { buildApiUrl, findExactModelChannel, modelOptionName, resolveModelRequestConfig, type AiConfig, type MediaChannelAdapter } from "@/stores/use-config-store";
 import { runModelPlugin } from "./model-plugin";
-import { GROK_MEDIA_VIDEO_ADAPTER_SCRIPT } from "./media-channel-adapter-scripts";
+import { resolveModelRuntimeAdapter, resolveModelRuntimeScript } from "./media-channel-presets";
+import { mediaChannelAdapterForVideoProfile } from "./media-model-adapters";
 import { grokMediaAspectRatio, grokMediaResolution, unwrapGrokMediaVideoResponse, type GrokMediaVideoResponse } from "./media-channel-video-contract";
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
@@ -63,10 +64,15 @@ export async function requestVideoGeneration(config: AiConfig, prompt: string, r
 export async function createVideoGenerationTask(config: AiConfig, prompt: string, references: ReferenceImage[] = [], videoReferences: ReferenceVideo[] = [], audioReferences: ReferenceAudio[] = [], options?: RequestOptions): Promise<VideoGenerationTask> {
     const selectedModel = (config.model || config.videoModel).trim();
     const requestConfig = resolveModelRequestConfig(config, selectedModel);
-    const channel = resolveModelChannel(config, selectedModel);
-    const script = resolveModelScript(config, selectedModel);
-    if (channel.adapter && (!script || script === GROK_MEDIA_VIDEO_ADAPTER_SCRIPT)) return createGrokMediaVideoTask(requestConfig, selectedModel, channel.adapter, prompt, references, videoReferences, audioReferences, options);
-    if (script) return createPluginVideoTask(requestConfig, selectedModel, script, prompt, references, options);
+    const adapterProfile = resolveModelRuntimeAdapter(config, selectedModel);
+    const mediaAdapter = mediaChannelAdapterForVideoProfile(adapterProfile);
+    if (mediaAdapter) return createGrokMediaVideoTask(requestConfig, selectedModel, mediaAdapter, prompt, references, videoReferences, audioReferences, options);
+    if (adapterProfile === "custom-script") {
+        const script = resolveModelRuntimeScript(config, selectedModel, adapterProfile);
+        if (!script) throw new Error(i18n.t("modelAdapterErrors.customScriptMissing"));
+        return createPluginVideoTask(requestConfig, selectedModel, script, prompt, references, options);
+    }
+    if (adapterProfile !== "protocol") throw new Error(i18n.t("modelAdapterErrors.mismatch"));
     assertVideoConfig(requestConfig, requestConfig.model);
     if (isSeedanceVideoConfig(requestConfig)) {
         return createSeedanceTask(requestConfig, selectedModel, prompt, references, videoReferences, audioReferences, options);
@@ -85,7 +91,8 @@ export async function pollVideoGenerationTask(config: AiConfig, task: VideoGener
     }
     if (task.provider === "grok-media") {
         const channel = findExactModelChannel(config, task.model);
-        if (!channel || !task.adapter || channel.adapter !== task.adapter) return { status: "failed", error: apiText("videoTaskQueryFailed") };
+        const adapter = mediaChannelAdapterForVideoProfile(resolveModelRuntimeAdapter(config, task.model));
+        if (!channel || !task.adapter || adapter !== task.adapter) return { status: "failed", error: apiText("videoTaskQueryFailed") };
         const requestConfig = resolveModelRequestConfig(config, task.model);
         assertVideoConfig(requestConfig, requestConfig.model);
         return pollGrokMediaVideoTask(requestConfig, task, options);

@@ -4,6 +4,7 @@ import { persist } from "zustand/middleware";
 import { nanoid } from "nanoid";
 
 import i18n from "@/i18n";
+import { normalizeModelAdapterProfile, type ModelAdapterProfile } from "@/services/api/media-model-adapters";
 
 export type ApiCallFormat = "openai" | "gemini" | "ark";
 export type ModelCapability = "image" | "video" | "text" | "audio";
@@ -13,6 +14,7 @@ export type ReasoningEffort = "auto" | "low" | "medium" | "high" | "xhigh";
 export type ChannelModel = {
     name: string;
     capability: ModelCapability;
+    adapterProfile?: ModelAdapterProfile;
     script?: string;
 };
 
@@ -187,6 +189,10 @@ export function resolveModelScript(config: AiConfig, value: string) {
     return findChannelModel(config, value)?.model.script?.trim() || "";
 }
 
+export function modelAdapterProfileOf(config: AiConfig, value: string): ModelAdapterProfile {
+    return findChannelModel(config, value)?.model.adapterProfile || "auto";
+}
+
 function isAiConfigReady(config: AiConfig, model: string) {
     const channel = resolveModelChannel(config, model);
     return Boolean(model.trim() && channel.baseUrl.trim() && channel.apiKey.trim());
@@ -226,34 +232,10 @@ export const useConfigStore = create<ConfigStore>()(
                 const persistedState = (persisted || {}) as Partial<ConfigStore>;
                 const persistedConfig = (persistedState.config || {}) as Partial<AiConfig>;
                 const persistedWebdav = (persistedState.webdav || {}) as Partial<WebdavSyncConfig>;
-                const config = { ...defaultConfig, ...persistedConfig };
-                if (!Array.isArray(persistedConfig.channels)) config.channels = [];
-                const channels = normalizeChannels(config);
-                const models = modelOptionsFromChannels(channels);
                 return {
                     ...current,
                     webdav: { ...defaultWebdavSyncConfig, ...persistedWebdav },
-                    config: {
-                        ...config,
-                        channelMode: "local",
-                        apiFormat: normalizeApiFormat(config.apiFormat),
-                        channels,
-                        models,
-                        imageModel: normalizeModelOptionValue(config.imageModel || config.model, channels),
-                        videoModel: normalizeModelOptionValue(config.videoModel, channels),
-                        textModel: normalizeModelOptionValue(config.textModel || config.model, channels),
-                        audioModel: normalizeModelOptionValue(config.audioModel || defaultConfig.audioModel, channels),
-                        audioVoice: config.audioVoice || defaultConfig.audioVoice,
-                        audioFormat: config.audioFormat || defaultConfig.audioFormat,
-                        audioSpeed: config.audioSpeed || defaultConfig.audioSpeed,
-                        audioInstructions: config.audioInstructions || "",
-                        reasoningEffort: config.reasoningEffort || "auto",
-                        videoSeconds: config.videoSeconds || "6",
-                        vquality: config.vquality || "720",
-                        videoGenerateAudio: config.videoGenerateAudio || "true",
-                        videoWatermark: config.videoWatermark || "false",
-                        canvasImageCount: config.canvasImageCount || "3",
-                    },
+                    config: normalizeAiConfig(persistedConfig),
                 };
             },
         },
@@ -274,8 +256,9 @@ export function normalizeChannelModels(models: Array<string | ChannelModel> | un
         if (!name || seen.has(name)) continue;
         seen.add(name);
         const capability = typeof item === "string" ? guessCapability(name) : item.capability || guessCapability(name);
+        const adapterProfile = typeof item === "string" ? undefined : normalizeModelAdapterProfile(item.adapterProfile, capability);
         const script = typeof item === "string" ? undefined : item.script?.trim() || undefined;
-        result.push({ name, capability, script });
+        result.push({ name, capability, adapterProfile, script });
     }
     return result;
 }
@@ -390,6 +373,33 @@ function normalizeChannels(config: AiConfig) {
         );
     }
     return channels;
+}
+
+export function normalizeAiConfig(value: Partial<AiConfig>): AiConfig {
+    const config = { ...defaultConfig, ...value };
+    if (!Array.isArray(value.channels)) config.channels = [];
+    const channels = normalizeChannels(config);
+    return {
+        ...config,
+        channelMode: "local",
+        apiFormat: normalizeApiFormat(config.apiFormat),
+        channels,
+        models: modelOptionsFromChannels(channels),
+        imageModel: normalizeModelOptionValue(config.imageModel || config.model, channels),
+        videoModel: normalizeModelOptionValue(config.videoModel, channels),
+        textModel: normalizeModelOptionValue(config.textModel || config.model, channels),
+        audioModel: normalizeModelOptionValue(config.audioModel || defaultConfig.audioModel, channels),
+        audioVoice: config.audioVoice || defaultConfig.audioVoice,
+        audioFormat: config.audioFormat || defaultConfig.audioFormat,
+        audioSpeed: config.audioSpeed || defaultConfig.audioSpeed,
+        audioInstructions: config.audioInstructions || "",
+        reasoningEffort: config.reasoningEffort || "auto",
+        videoSeconds: config.videoSeconds || "6",
+        vquality: config.vquality || "720",
+        videoGenerateAudio: config.videoGenerateAudio || "true",
+        videoWatermark: config.videoWatermark || "false",
+        canvasImageCount: config.canvasImageCount || "3",
+    };
 }
 
 export function defaultBaseUrlForApiFormat(apiFormat: ApiCallFormat) {

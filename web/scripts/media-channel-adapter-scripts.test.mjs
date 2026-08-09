@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { GROK2API_IMAGE_ADAPTER_SCRIPT, GROK_MEDIA_VIDEO_ADAPTER_SCRIPT, SUB2API_IMAGE_ADAPTER_SCRIPT, grokMediaCapability } from "../src/services/api/media-channel-adapter-scripts.ts";
+import { mediaChannelAdapterForVideoProfile, modelAdapterProfilesForCapability, normalizeModelAdapterProfile, resolveMediaModelAdapter } from "../src/services/api/media-model-adapters.ts";
 
 function runScript(script, overrides = {}) {
     const values = {
@@ -33,6 +34,28 @@ test("Grok media model aliases receive the correct capability", () => {
     assert.equal(grokMediaCapability("grok-imagine-image-quality"), "image");
     assert.equal(grokMediaCapability("grok-imagine-video-1.5"), "video");
     assert.equal(grokMediaCapability("grok-4.5"), undefined);
+    assert.equal(grokMediaCapability("gpt-image-2"), undefined);
+});
+
+test("model adapters default by channel and capability but allow explicit overrides", () => {
+    assert.equal(resolveMediaModelAdapter({ channelAdapter: "grok2api", capability: "image" }), "grok2api-image");
+    assert.equal(resolveMediaModelAdapter({ channelAdapter: "sub2api", capability: "video" }), "sub2api-video");
+    assert.equal(resolveMediaModelAdapter({ capability: "image" }), "protocol");
+    assert.equal(resolveMediaModelAdapter({ selected: "protocol", channelAdapter: "grok2api", capability: "image", legacyHint: "custom-script" }), "protocol");
+    assert.equal(resolveMediaModelAdapter({ channelAdapter: "sub2api", capability: "video", legacyHint: "grok-video" }), "sub2api-video");
+    assert.equal(resolveMediaModelAdapter({ channelAdapter: "sub2api", capability: "video", legacyHint: "grok2api-image" }), "sub2api-video");
+});
+
+test("model adapter options follow capability and video profiles preserve provider identity", () => {
+    assert.deepEqual(modelAdapterProfilesForCapability("image"), ["auto", "protocol", "grok2api-image", "sub2api-image", "custom-script"]);
+    assert.deepEqual(modelAdapterProfilesForCapability("video"), ["auto", "protocol", "grok2api-video", "sub2api-video", "custom-script"]);
+    assert.deepEqual(modelAdapterProfilesForCapability("text"), ["auto", "protocol", "custom-script"]);
+    assert.equal(normalizeModelAdapterProfile("grok2api-image", "image"), "grok2api-image");
+    assert.equal(normalizeModelAdapterProfile("grok2api-image", "video"), undefined);
+    assert.equal(normalizeModelAdapterProfile("unknown", "image"), undefined);
+    assert.equal(mediaChannelAdapterForVideoProfile("grok2api-video"), "grok2api");
+    assert.equal(mediaChannelAdapterForVideoProfile("sub2api-video"), "sub2api");
+    assert.equal(mediaChannelAdapterForVideoProfile("protocol"), undefined);
 });
 
 test("Grok2API image adapter sends JSON generation requests and resolves relative URLs", async () => {

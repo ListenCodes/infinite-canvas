@@ -4,7 +4,8 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { defaultBaseUrlForApiFormat, normalizeChannelModels, type ApiCallFormat, type ChannelModel, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
-import { createMediaChannelModel } from "@/services/api/media-channel-presets";
+import { builtInMediaAdapterScriptCapability, createMediaChannelModel } from "@/services/api/media-channel-presets";
+import { modelAdapterProfilesForCapability, type ModelAdapterProfile } from "@/services/api/media-model-adapters";
 import { ModelScriptEditor } from "./model-script-editor";
 import { ModelSelectModal } from "./model-select-modal";
 
@@ -41,8 +42,35 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
         setModels(names.map((name) => map.get(name) || createMediaChannelModel(draft.adapter, name)));
     };
 
-    const setCapability = (name: string, capability: ModelCapability) => setModels(draft.models.map((model) => (model.name === name ? { ...model, capability } : model)));
-    const setScript = (name: string, script: string) => setModels(draft.models.map((model) => (model.name === name ? { ...model, script: script || undefined } : model)));
+    const setCapability = (name: string, capability: ModelCapability) =>
+        setModels(
+            draft.models.map((model) => {
+                if (model.name !== name) return model;
+                const adapterProfile = model.adapterProfile || "auto";
+                const scriptCapability = builtInMediaAdapterScriptCapability(model.script || "");
+                return {
+                    ...model,
+                    capability,
+                    adapterProfile: modelAdapterProfilesForCapability(capability).includes(adapterProfile) ? adapterProfile : "auto",
+                    script: scriptCapability && scriptCapability !== capability ? undefined : model.script,
+                };
+            }),
+        );
+    const setAdapterProfile = (model: ChannelModel, adapterProfile: ModelAdapterProfile) => {
+        if (adapterProfile === "custom-script") {
+            setScriptTarget({ name: model.name, capability: model.capability, value: model.script || "" });
+            return;
+        }
+        setModels(draft.models.map((item) => (item.name === model.name ? { ...item, adapterProfile } : item)));
+    };
+    const setScript = (name: string, script: string) =>
+        setModels(
+            draft.models.map((model) => {
+                if (model.name !== name) return model;
+                const value = script.trim() || undefined;
+                return { ...model, script: value, adapterProfile: value ? "custom-script" : model.adapterProfile === "custom-script" ? "auto" : model.adapterProfile };
+            }),
+        );
     const removeModel = (name: string) => setModels(draft.models.filter((model) => model.name !== name));
 
     const save = () => {
@@ -53,13 +81,15 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
     return (
         <Drawer
             open={open}
-            width={640}
+            size="min(640px, 100vw)"
             title={t("config.channelEditor.title")}
             onClose={onClose}
             styles={{ body: { paddingTop: 16 } }}
             extra={
                 <Space>
-                    <Button onClick={onClose}>{t("common.cancel")}</Button>
+                    <span className="hidden sm:inline">
+                        <Button onClick={onClose}>{t("common.cancel")}</Button>
+                    </span>
                     <Button type="primary" onClick={save}>
                         {t("common.save")}
                     </Button>
@@ -99,11 +129,19 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
                 {draft.models.length ? (
                     draft.models.map((model) => (
                         <div key={model.name} className="flex flex-wrap items-center gap-3 rounded-md px-2 py-1.5 hover:bg-stone-50 dark:hover:bg-stone-900/40">
-                            <span className="min-w-0 flex-1 truncate text-sm" title={model.name}>
+                            <span className="min-w-40 flex-1 truncate text-sm" title={model.name}>
                                 {model.name}
                             </span>
-                            <div className="flex shrink-0 items-center gap-2">
+                            <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
                                 <Segmented size="small" value={model.capability} options={capabilityOptions} onChange={(value) => setCapability(model.name, value as ModelCapability)} />
+                                <Select
+                                    size="small"
+                                    className="w-40"
+                                    aria-label={t("config.channelEditor.adapter")}
+                                    value={model.adapterProfile || "auto"}
+                                    options={modelAdapterProfilesForCapability(model.capability).map((value) => ({ value, label: t(`config.channelEditor.adapters.${value}`) }))}
+                                    onChange={(value) => setAdapterProfile(model, value)}
+                                />
                                 <Button size="small" type={model.script ? "primary" : "default"} ghost={Boolean(model.script)} onClick={() => setScriptTarget({ name: model.name, capability: model.capability, value: model.script || "" })}>
                                     {t(model.script ? "config.channelEditor.scriptReady" : "config.channelEditor.script")}
                                 </Button>

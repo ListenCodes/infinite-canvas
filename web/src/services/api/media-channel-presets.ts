@@ -1,6 +1,20 @@
-import { createModelChannel, guessCapability, type ChannelModel, type MediaChannelAdapter, type ModelChannel } from "@/stores/use-config-store";
+import {
+    createModelChannel,
+    findExactModelChannel,
+    guessCapability,
+    modelAdapterProfileOf,
+    modelCapabilityOf,
+    modelOptionName,
+    resolveModelScript,
+    type AiConfig,
+    type ChannelModel,
+    type MediaChannelAdapter,
+    type ModelCapability,
+    type ModelChannel,
+} from "@/stores/use-config-store";
 
-import { GROK2API_IMAGE_ADAPTER_SCRIPT, SUB2API_IMAGE_ADAPTER_SCRIPT, grokMediaCapability } from "./media-channel-adapter-scripts";
+import { GROK2API_IMAGE_ADAPTER_SCRIPT, GROK_MEDIA_VIDEO_ADAPTER_SCRIPT, SUB2API_IMAGE_ADAPTER_SCRIPT, grokMediaCapability } from "./media-channel-adapter-scripts";
+import { resolveMediaModelAdapter, type LegacyAdapterHint, type ModelAdapterProfile } from "./media-model-adapters";
 
 const PRESETS: Record<MediaChannelAdapter, { baseUrl: string; models: string[] }> = {
     grok2api: {
@@ -26,7 +40,39 @@ export function createMediaChannelPreset(adapter: MediaChannelAdapter, name: str
 
 export function createMediaChannelModel(adapter: MediaChannelAdapter | undefined, name: string): ChannelModel {
     const capability = adapter ? grokMediaCapability(name) || guessCapability(name) : guessCapability(name);
-    if (!adapter || capability !== "image") return { name, capability };
-    const script = adapter === "grok2api" ? GROK2API_IMAGE_ADAPTER_SCRIPT : SUB2API_IMAGE_ADAPTER_SCRIPT;
-    return { name, capability, script };
+    return { name, capability, adapterProfile: "auto" };
+}
+
+export function resolveModelRuntimeAdapter(config: AiConfig, value: string): Exclude<ModelAdapterProfile, "auto"> {
+    const channel = findExactModelChannel(config, value);
+    const capability = modelCapabilityOf(config, value) || guessCapability(value);
+    const mediaCapability = grokMediaCapability(modelOptionName(value));
+    const script = resolveModelScript(config, value);
+    return resolveMediaModelAdapter({
+        selected: modelAdapterProfileOf(config, value),
+        channelAdapter: mediaCapability === capability ? channel?.adapter : undefined,
+        capability,
+        legacyHint: legacyAdapterHint(script),
+    });
+}
+
+export function resolveModelRuntimeScript(config: AiConfig, value: string, profile = resolveModelRuntimeAdapter(config, value)) {
+    if (profile === "grok2api-image") return GROK2API_IMAGE_ADAPTER_SCRIPT;
+    if (profile === "sub2api-image") return SUB2API_IMAGE_ADAPTER_SCRIPT;
+    if (profile === "custom-script") return resolveModelScript(config, value);
+    return "";
+}
+
+export function builtInMediaAdapterScriptCapability(script: string): ModelCapability | undefined {
+    if (script === GROK2API_IMAGE_ADAPTER_SCRIPT || script === SUB2API_IMAGE_ADAPTER_SCRIPT) return "image";
+    if (script === GROK_MEDIA_VIDEO_ADAPTER_SCRIPT) return "video";
+    return undefined;
+}
+
+function legacyAdapterHint(script: string): LegacyAdapterHint {
+    if (!script) return undefined;
+    if (script === GROK2API_IMAGE_ADAPTER_SCRIPT) return "grok2api-image";
+    if (script === SUB2API_IMAGE_ADAPTER_SCRIPT) return "sub2api-image";
+    if (script === GROK_MEDIA_VIDEO_ADAPTER_SCRIPT) return "grok-video";
+    return "custom-script";
 }
