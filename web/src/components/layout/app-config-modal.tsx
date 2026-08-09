@@ -1,6 +1,6 @@
-import { App, Button, Form, Input, Modal, Progress, Select, Tabs } from "antd";
+import { App, Button, Dropdown, Form, Input, Modal, Progress, Select, Tabs } from "antd";
 import type { TFunction } from "i18next";
-import { Cloud, Download, Pencil, Plus, RefreshCw, Trash2, Upload, Wifi } from "lucide-react";
+import { ChevronDown, Cloud, Download, Pencil, Plus, RefreshCw, Trash2, Upload, Wifi } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -12,8 +12,21 @@ import type { AppLocale } from "@/i18n";
 import { exportAppConfig, importAppConfig } from "@/services/config-file";
 import { syncAppDataToWebdav, type AppSyncDomainKey, type AppSyncProgressEvent } from "@/services/app-sync";
 import { testWebdavConnection, WEBDAV_MANIFEST_FILE_NAME } from "@/services/webdav-sync";
+import { createMediaChannelPreset } from "@/services/api/media-channel-presets";
 import { audioFormatOptions, audioVoiceOptions, normalizeAudioSpeedValue } from "@/lib/audio-generation";
-import { createModelChannel, modelOptionsFromChannels, normalizeModelOptionValue, selectableModelsByCapability, useConfigStore, type AiConfig, type ApiCallFormat, type ConfigTabKey, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
+import {
+    createModelChannel,
+    modelOptionsFromChannels,
+    normalizeModelOptionValue,
+    selectableModelsByCapability,
+    useConfigStore,
+    type AiConfig,
+    type ApiCallFormat,
+    type ConfigTabKey,
+    type MediaChannelAdapter,
+    type ModelCapability,
+    type ModelChannel,
+} from "@/stores/use-config-store";
 
 type ModelGroup = {
     capability: ModelCapability;
@@ -93,8 +106,8 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
 
     const updateChannels = (channels: ModelChannel[]) => saveConfig(withChannels(config, channels));
 
-    const addChannel = () => {
-        const channel = createModelChannel({ name: t("config.channels.numberedName", { count: config.channels.length + 1 }) });
+    const addChannel = (adapter?: MediaChannelAdapter) => {
+        const channel = adapter ? createMediaChannelPreset(adapter, t(`config.channels.presets.${adapter}`)) : createModelChannel({ name: t("config.channels.numberedName", { count: config.channels.length + 1 }) });
         updateChannels([...config.channels, channel]);
         setEditingChannelId(channel.id);
     };
@@ -186,9 +199,24 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                             <div>
                                 <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
                                     <div className="text-xs text-stone-500">{t("config.channels.description")}</div>
-                                    <Button type="primary" icon={<Plus className="size-4" />} onClick={addChannel}>
-                                        {t("config.channels.add")}
-                                    </Button>
+                                    <Dropdown
+                                        trigger={["click"]}
+                                        menu={{
+                                            items: [
+                                                { key: "blank", label: t("config.channels.presets.blank") },
+                                                { key: "grok2api", label: t("config.channels.presets.grok2api") },
+                                                { key: "sub2api", label: t("config.channels.presets.sub2api") },
+                                            ],
+                                            onClick: ({ key }) => addChannel(key === "blank" ? undefined : (key as MediaChannelAdapter)),
+                                        }}
+                                    >
+                                        <Button type="primary" icon={<Plus className="size-4" />}>
+                                            <span className="inline-flex items-center gap-1">
+                                                {t("config.channels.add")}
+                                                <ChevronDown className="size-3.5" />
+                                            </span>
+                                        </Button>
+                                    </Dropdown>
                                 </div>
                                 <div className="space-y-2">
                                     {config.channels.map((channel) => (

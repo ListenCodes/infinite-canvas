@@ -457,6 +457,11 @@ export default {
             defaultName: "Default provider",
             newName: "New provider",
             indexedName: "Provider {{index}}",
+            presets: {
+                blank: "Blank provider",
+                grok2api: "Grok2API",
+                sub2api: "Sub2API",
+            },
         },
         preferences: {
             interface: "Interface",

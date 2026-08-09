@@ -457,6 +457,11 @@ export default {
             defaultName: "默认渠道",
             newName: "新渠道",
             indexedName: "渠道 {{index}}",
+            presets: {
+                blank: "空白渠道",
+                grok2api: "Grok2API",
+                sub2api: "Sub2API",
+            },
         },
         preferences: {
             interface: "界面偏好",
