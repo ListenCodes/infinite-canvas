@@ -307,6 +307,7 @@ function readAxiosError(error: unknown, fallback: string) {
     if (axios.isCancel(error)) return apiText("requestCanceled");
     if (axios.isAxiosError(error)) {
         if (error.code === "ECONNABORTED") return i18n.t("common.imageTimeout");
+        if (error.response?.status === 504) return i18n.t("common.imageTimeout");
         const responseData = error.response?.data;
         // Prefer the API error from the response body.
         const apiMsg = readApiErrorMessage(responseData);
@@ -314,6 +315,7 @@ function readAxiosError(error: unknown, fallback: string) {
         // Infer the error from the HTTP status when the response body has no usable message.
         const statusMsg = readStatusError(error.response?.status, fallback);
         if (statusMsg) return statusMsg;
+        if (!error.response && error.message === "Network Error") return i18n.t("networkErrors.imageGatewayInterrupted");
         // Fall back to Axios's own error message.
         return error.message || fallback;
     }
@@ -327,6 +329,7 @@ function readStatusError(status: number | undefined, fallback: string) {
     if (status === 404) return apiText("notFound");
     if (status === 502) return apiText("badGateway");
     if (status === 503) return apiText("serviceBusy");
+    if (status === 504) return i18n.t("common.imageTimeout");
     return status ? apiText("httpFailed", { status }) : fallback;
 }
 

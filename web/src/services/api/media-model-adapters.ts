@@ -38,6 +38,11 @@ export function resolveMediaModelAdapter({
     return "protocol";
 }
 
+export function legacyAdapterHintForModel(legacyHint: LegacyAdapterHint, capability: ModelCapability, recognizedMediaCapability: ModelCapability | undefined): LegacyAdapterHint {
+    if (legacyHint === "custom-script") return legacyHint;
+    return recognizedMediaCapability === capability ? legacyHint : undefined;
+}
+
 export function mediaChannelAdapterForVideoProfile(profile: ModelAdapterProfile): MediaChannelAdapter | undefined {
     if (profile === "grok2api-video") return "grok2api";
     if (profile === "sub2api-video") return "sub2api";

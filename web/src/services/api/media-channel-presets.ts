@@ -14,7 +14,7 @@ import {
 } from "@/stores/use-config-store";
 
 import { GROK2API_IMAGE_ADAPTER_SCRIPT, GROK_MEDIA_VIDEO_ADAPTER_SCRIPT, SUB2API_IMAGE_ADAPTER_SCRIPT, grokMediaCapability } from "./media-channel-adapter-scripts";
-import { resolveMediaModelAdapter, type LegacyAdapterHint, type ModelAdapterProfile } from "./media-model-adapters";
+import { legacyAdapterHintForModel, resolveMediaModelAdapter, type LegacyAdapterHint, type ModelAdapterProfile } from "./media-model-adapters";
 
 const PRESETS: Record<MediaChannelAdapter, { baseUrl: string; models: string[] }> = {
     grok2api: {
@@ -52,7 +52,7 @@ export function resolveModelRuntimeAdapter(config: AiConfig, value: string): Exc
         selected: modelAdapterProfileOf(config, value),
         channelAdapter: mediaCapability === capability ? channel?.adapter : undefined,
         capability,
-        legacyHint: legacyAdapterHint(script),
+        legacyHint: legacyAdapterHintForModel(legacyAdapterHint(script), capability, mediaCapability),
     });
 }
 

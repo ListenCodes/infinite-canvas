@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { GROK2API_IMAGE_ADAPTER_SCRIPT, GROK_MEDIA_VIDEO_ADAPTER_SCRIPT, SUB2API_IMAGE_ADAPTER_SCRIPT, grokMediaCapability } from "../src/services/api/media-channel-adapter-scripts.ts";
-import { mediaChannelAdapterForVideoProfile, modelAdapterProfilesForCapability, normalizeModelAdapterProfile, resolveMediaModelAdapter } from "../src/services/api/media-model-adapters.ts";
+import { legacyAdapterHintForModel, mediaChannelAdapterForVideoProfile, modelAdapterProfilesForCapability, normalizeModelAdapterProfile, resolveMediaModelAdapter } from "../src/services/api/media-model-adapters.ts";
 
 function runScript(script, overrides = {}) {
     const values = {
@@ -56,6 +56,12 @@ test("model adapter options follow capability and video profiles preserve provid
     assert.equal(mediaChannelAdapterForVideoProfile("grok2api-video"), "grok2api");
     assert.equal(mediaChannelAdapterForVideoProfile("sub2api-video"), "sub2api");
     assert.equal(mediaChannelAdapterForVideoProfile("protocol"), undefined);
+});
+
+test("auto mode ignores legacy built-in media scripts for non-Grok model names", () => {
+    assert.equal(legacyAdapterHintForModel("sub2api-image", "image", undefined), undefined);
+    assert.equal(legacyAdapterHintForModel("sub2api-image", "image", "image"), "sub2api-image");
+    assert.equal(legacyAdapterHintForModel("custom-script", "image", undefined), "custom-script");
 });
 
 test("Grok2API image adapter sends JSON generation requests and resolves relative URLs", async () => {
