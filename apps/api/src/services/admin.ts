@@ -21,6 +21,7 @@ import {
   unknownResolutionRequestSchema,
   unknownResolutionResponseSchema,
 } from "@infinite-canvas/contracts";
+import { jsonParameter } from "@infinite-canvas/db";
 import { assertPublicAddress, validateRemoteMediaUrl } from "@infinite-canvas/domain";
 
 import type { Sql, TransactionSql } from "../database.js";
@@ -174,7 +175,7 @@ async function completePlatformRequest(
   await transaction`
     update platform_idempotency_requests
     set status = 'completed', response_status = 200,
-        response_body = ${JSON.stringify(responseBody)}::jsonb, updated_at = now()
+        response_body = ${jsonParameter(transaction, responseBody)}, updated_at = now()
     where id = ${requestId}
   `;
 }
@@ -311,12 +312,12 @@ export class AdminService {
       await transaction`
         insert into outbox_events (id, workspace_id, topic, aggregate_id, dedupe_key, payload)
         values (${syncEventId}, ${workspaceId}, 'account.auth.sync_requested', ${userId},
-                ${`account-auth:${userId}:${syncEventId}`}, ${JSON.stringify({ userId })}::jsonb)
+                ${`account-auth:${userId}:${syncEventId}`}, ${transaction.json({ userId })})
       `;
       await transaction`
         insert into audit_logs (id, actor_user_id, actor_type, action, target_type, target_id, reason, before_summary, after_summary, correlation_id)
         values (${this.createId()}, ${actorUserId}, 'admin', ${statusChanged ? "user.status.change" : "user.auth.resync"}, 'user', ${userId}, ${input.reason},
-                ${JSON.stringify({ status: current.status })}::jsonb, ${JSON.stringify({ status: input.status })}::jsonb,
+                ${transaction.json({ status: current.status })}, ${transaction.json({ status: input.status })},
                 ${`user-status:${userId}:${this.createId()}`})
       `;
       return adminUserStatusResponseSchema.parse({ userId, status: input.status });
@@ -371,13 +372,13 @@ export class AdminService {
         ) values (
           ${this.createId()}, ${actorUserId}, 'admin', 'user.features.change',
           'user', ${userId}, ${input.reason},
-          ${JSON.stringify({
+          ${transaction.json({
             projects: current.cloud_projects_enabled,
             imageGeneration: current.cloud_image_enabled,
             videoGeneration: current.cloud_video_enabled,
             credits: current.cloud_credits_enabled,
-          })}::jsonb,
-          ${JSON.stringify(flags)}::jsonb,
+          })},
+          ${transaction.json(flags)},
           ${`user-features:${userId}:${this.createId()}`}
         )
       `;
@@ -441,14 +442,14 @@ export class AdminService {
         ) values (
           ${this.createId()}, ${input.workspaceId}, ${actorUserId}, 'admin', 'wallet.adjust', 'wallet',
           ${input.workspaceId}, ${input.reason},
-          ${JSON.stringify({ amount: input.amount, available: wallet.available, reserved: wallet.reserved })}::jsonb,
+          ${transaction.json({ amount: input.amount, available: wallet.available, reserved: wallet.reserved })},
           ${`admin-wallet:${idempotencyKey}`}
         )
       `;
       const response = adminWalletAdjustmentResponseSchema.parse({ workspaceId: input.workspaceId, available: wallet.available, reserved: wallet.reserved });
       await transaction`
         update idempotency_requests set status = 'completed', response_status = 200,
-          response_body = ${JSON.stringify(response)}::jsonb, updated_at = now()
+          response_body = ${transaction.json(response)}, updated_at = now()
         where id = ${request.id}
       `;
       return response;
@@ -520,7 +521,7 @@ export class AdminService {
         return providerChannelMutationResponseSchema.parse(request.response_body);
       await transaction`
         insert into provider_channels (id, name, type, base_url, capabilities)
-        values (${id}, ${input.name}, ${input.type}, ${baseUrl.toString()}, ${JSON.stringify(input.capabilities)}::jsonb)
+        values (${id}, ${input.name}, ${input.type}, ${baseUrl.toString()}, ${transaction.json(input.capabilities)})
         on conflict (id) do update
           set name = excluded.name, type = excluded.type, base_url = excluded.base_url,
               capabilities = excluded.capabilities, updated_at = now()
@@ -531,7 +532,7 @@ export class AdminService {
         ) values (
           ${this.createId()}, ${actorUserId}, 'admin', ${input.id ? "provider.channel.update" : "provider.channel.create"},
           'provider_channel', ${id},
-          ${JSON.stringify({ name: input.name, type: input.type, capabilities: input.capabilities })}::jsonb,
+          ${transaction.json({ name: input.name, type: input.type, capabilities: input.capabilities })},
           ${`provider-channel:${id}:${this.createId()}`}
         )
       `;
@@ -585,7 +586,7 @@ export class AdminService {
             id, actor_user_id, actor_type, action, target_type, target_id, after_summary, correlation_id
           ) values (
             ${this.createId()}, ${actorUserId}, 'admin', 'provider.credential.rotate', 'provider_channel', ${channelId},
-            ${JSON.stringify({ version, secretSuffix: secret.slice(-4) })}::jsonb,
+            ${transaction.json({ version, secretSuffix: secret.slice(-4) })},
             ${`provider-credential:${channelId}:${version}`}
           )
         `;
@@ -657,7 +658,7 @@ export class AdminService {
           config_version, limits_json, concurrency_limit, provider_idempotency_supported
         ) values (
           ${modelConfigId}, ${channelId}, ${input.model}, ${input.capability}, ${input.adapterType},
-          ${input.adapterVersion}, ${configVersion}, ${JSON.stringify(input.limits)}::jsonb, ${input.concurrencyLimit},
+          ${input.adapterVersion}, ${configVersion}, ${jsonParameter(transaction, input.limits)}, ${input.concurrencyLimit},
           ${input.providerIdempotencySupported}
         )
       `;
@@ -670,12 +671,12 @@ export class AdminService {
           id, actor_user_id, actor_type, action, target_type, target_id, after_summary, correlation_id
         ) values (
           ${this.createId()}, ${actorUserId}, 'admin', 'model_config.create', 'model_config', ${modelConfigId},
-          ${JSON.stringify({
+          ${transaction.json({
             channelId, model: input.model, capability: input.capability, adapterType: input.adapterType,
             adapterVersion: input.adapterVersion, configVersion, concurrencyLimit: input.concurrencyLimit,
             rateLimitPerMinute: input.rateLimitPerMinute, capacityVersion,
             providerIdempotencySupported: input.providerIdempotencySupported, creditAmount: input.creditAmount,
-          })}::jsonb,
+          })},
           ${`model-config:${modelConfigId}`}
         )
       `;
@@ -753,7 +754,7 @@ export class AdminService {
         await transaction`select app.release_reservation(${attemptId}, ${this.createId()}, ${`manual_${input.resolution}`})`;
         await transaction`
           update generation_attempts set status = 'failed', completed_at = now(), error_code = ${`manual_${input.resolution}`},
-            error_message = ${input.reason}, evidence_json = ${JSON.stringify(input.evidence)}::jsonb, updated_at = now()
+            error_message = ${input.reason}, evidence_json = ${jsonParameter(transaction, input.evidence)}, updated_at = now()
           where id = ${attemptId}
         `;
         status = "failed";
@@ -763,7 +764,7 @@ export class AdminService {
         await transaction`
           update generation_attempts set status = ${attemptStatus}::attempt_status,
             provider_task_id = ${input.resolution === "accepted" ? input.providerTaskId : null},
-            evidence_json = ${JSON.stringify({ ...input.evidence, ...(mediaUrl ? { mediaUrls: [mediaUrl] } : {}) })}::jsonb,
+            evidence_json = ${transaction.json({ ...input.evidence, ...(mediaUrl ? { mediaUrls: [mediaUrl] } : {}) })},
             business_deadline_at = case
               when ${input.resolution === "accepted"} then greatest(business_deadline_at, now() + interval '30 minutes')
               else business_deadline_at
@@ -790,7 +791,7 @@ export class AdminService {
           values (
             ${this.createId()}, ${current.workspace_id}, 'generation.job.requested', ${current.job_id},
             ${`generation.job.reconciled:${attemptId}:${idempotencyKey}`},
-            ${JSON.stringify({
+            ${transaction.json({
               schemaVersion: 2, workflowName: "media-generation-v2", workspaceId: current.workspace_id,
               projectId: current.project_id, batchId: current.batch_id, jobId: current.job_id,
               attemptId, capability: current.capability, channelId: current.channel_id,
@@ -801,7 +802,7 @@ export class AdminService {
                 channelConcurrencyLimit: current.channel_concurrency_limit,
                 channelRateLimitPerMinute: current.channel_rate_limit_per_minute,
               },
-            })}::jsonb
+            })}
           )
         `;
       }
@@ -813,7 +814,7 @@ export class AdminService {
       await transaction`
         insert into audit_logs (id, workspace_id, actor_user_id, actor_type, action, target_type, target_id, reason, after_summary, correlation_id)
         values (${this.createId()}, ${current.workspace_id}, ${actorUserId}, 'admin', 'outcome_unknown.resolve', 'attempt', ${attemptId},
-                ${input.reason}, ${JSON.stringify({ resolution: input.resolution, evidence: input.evidence })}::jsonb, ${`unknown-resolve:${attemptId}:${idempotencyKey}`})
+                ${input.reason}, ${jsonParameter(transaction, { resolution: input.resolution, evidence: input.evidence })}, ${`unknown-resolve:${attemptId}:${idempotencyKey}`})
       `;
       await transaction`
         insert into generation_job_events (workspace_id, aggregate_type, aggregate_id, project_id, batch_id, job_id, attempt_id, type, payload)
@@ -823,7 +824,7 @@ export class AdminService {
       `;
       await transaction`select app.refresh_generation_batch(${current.batch_id})`;
       const response = unknownResolutionResponseSchema.parse({ attemptId, status });
-      await transaction`update idempotency_requests set status = 'completed', response_status = 200, response_body = ${JSON.stringify(response)}::jsonb, updated_at = now() where id = ${request.id}`;
+      await transaction`update idempotency_requests set status = 'completed', response_status = 200, response_body = ${transaction.json(response)}, updated_at = now() where id = ${request.id}`;
       return response;
     });
   }

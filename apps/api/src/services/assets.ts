@@ -131,7 +131,7 @@ export class AssetService {
       await transaction`
         update idempotency_requests
         set status = 'completed', response_status = 201,
-            response_body = ${JSON.stringify(response)}::jsonb, updated_at = now()
+            response_body = ${transaction.json(response)}, updated_at = now()
         where id = ${request.id}
       `;
       return { ...response, status: "uploading" as const };

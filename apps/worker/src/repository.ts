@@ -610,7 +610,7 @@ export class GenerationRepository {
         await serviceContext(transaction);
         const attempts = await transaction<{ id: string }[]>`
           update generation_attempts attempt
-          set status = 'materializing', evidence_json = ${JSON.stringify({ mediaUrls: [mediaUrl.toString()] })}::jsonb,
+          set status = 'materializing', evidence_json = ${transaction.json({ mediaUrls: [mediaUrl.toString()] })},
               executor_claim_id = null, executor_run_id = null, reconcile_after = null,
               executor_dispatch_token = ${nextDispatchToken}::uuid,
               error_code = null, error_message = null, updated_at = now()
@@ -642,7 +642,7 @@ export class GenerationRepository {
         await transaction`
           insert into outbox_events (id, workspace_id, topic, aggregate_id, dedupe_key, payload)
           values (${this.createId()}, ${input.workspaceId}, 'generation.job.requested', ${input.jobId},
-                  ${`generation.job.unknown-recovered:${input.attemptId}`}, ${JSON.stringify(input)}::jsonb)
+                  ${`generation.job.unknown-recovered:${input.attemptId}`}, ${transaction.json(input)})
           on conflict (dedupe_key) do update
             set status = 'pending', attempts = 0, available_at = now(), dispatch_started_token = null, last_error = null,
                 locked_by = null, locked_at = null, sent_at = null, updated_at = now()
@@ -822,7 +822,7 @@ export class GenerationRepository {
       await serviceContext(transaction);
       const rows = await transaction<{ id: string }[]>`
         update generation_attempts attempt
-        set status = 'materializing', evidence_json = ${JSON.stringify({ mediaUrls: [mediaUrl.toString()] })}::jsonb, updated_at = now()
+        set status = 'materializing', evidence_json = ${transaction.json({ mediaUrls: [mediaUrl.toString()] })}, updated_at = now()
         from generation_jobs job
         where attempt.id = ${input.attemptId} and attempt.status in ('submitting', 'accepted')
           and attempt.executor_claim_id = ${executorClaimId}
@@ -854,7 +854,7 @@ export class GenerationRepository {
       await serviceContext(transaction);
       const attempts = await transaction<{ id: string }[]>`
         update generation_attempts attempt
-        set status = 'materializing', evidence_json = ${JSON.stringify({
+        set status = 'materializing', evidence_json = ${transaction.json({
           materializedAsset: {
             objectKey: asset.objectKey,
             mime: asset.mime,
@@ -862,7 +862,7 @@ export class GenerationRepository {
             sha256: asset.sha256,
             kind: asset.kind,
           },
-        })}::jsonb, updated_at = now()
+        })}, updated_at = now()
         from generation_jobs job
         where attempt.id = ${input.attemptId} and attempt.status in ('submitting', 'accepted', 'materializing')
           and attempt.executor_claim_id = ${executorClaimId}
@@ -1154,7 +1154,7 @@ export class GenerationRepository {
           insert into outbox_events (id, workspace_id, topic, aggregate_id, dedupe_key, payload)
           values (
             ${this.createId()}, ${input.workspaceId}, 'generation.job.requested', ${input.jobId},
-            ${`generation.job.recovery:${input.attemptId}`}, ${JSON.stringify(input)}::jsonb
+            ${`generation.job.recovery:${input.attemptId}`}, ${transaction.json(input)}
           ) on conflict (dedupe_key) do update
             set status = 'pending', attempts = 0, available_at = now() + interval '30 seconds', dispatch_started_token = null,
                 last_error = null, locked_by = null, locked_at = null, sent_at = null, updated_at = now()

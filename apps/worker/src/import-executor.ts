@@ -1,6 +1,7 @@
 import type postgres from "postgres";
 
 import type { LocalDataImportWorkflowInput } from "@infinite-canvas/contracts";
+import { jsonParameter } from "@infinite-canvas/db";
 import { parseLocalDataArchive } from "@infinite-canvas/importer";
 
 import type { ObjectStorage } from "./storage.js";
@@ -111,7 +112,7 @@ export class ImportExecutor {
             insert into projects (
               id, workspace_id, title, document_json, updated_by, import_id, source_id
             ) values (
-              ${projectId}, ${input.workspaceId}, ${project.title}, ${JSON.stringify(documentJson)}::jsonb,
+              ${projectId}, ${input.workspaceId}, ${project.title}, ${jsonParameter(transaction, documentJson)},
               ${input.userId}, ${input.importId}, ${project.sourceId}
             ) on conflict (workspace_id, import_id, source_id) do update
               set title = excluded.title, document_json = excluded.document_json, updated_at = now()
@@ -125,7 +126,7 @@ export class ImportExecutor {
           sourceMappings.set(project.sourceId, targetId);
           await transaction`
             insert into project_versions (id, workspace_id, project_id, version, snapshot_json, reason, created_by)
-            values (${this.createId()}, ${input.workspaceId}, ${targetId}, 1, ${JSON.stringify(documentJson)}::jsonb, 'local_import', ${input.userId})
+            values (${this.createId()}, ${input.workspaceId}, ${targetId}, 1, ${jsonParameter(transaction, documentJson)}, 'local_import', ${input.userId})
             on conflict (project_id, version) do nothing
           `;
           await transaction`
@@ -138,7 +139,7 @@ export class ImportExecutor {
         const mappings = Object.fromEntries(sourceMappings);
         await transaction`
           update imports
-          set status = 'published', counts_json = ${JSON.stringify({ ...parsed.manifest.counts, mappings })}::jsonb,
+          set status = 'published', counts_json = ${transaction.json({ ...parsed.manifest.counts, mappings })},
               published_at = now(), error_code = null, error_message = null, updated_at = now()
           where id = ${input.importId}
         `;
@@ -147,7 +148,7 @@ export class ImportExecutor {
             id, workspace_id, actor_user_id, actor_type, action, target_type, target_id, after_summary, correlation_id
           ) values (
             ${this.createId()}, ${input.workspaceId}, ${input.userId}, 'user', 'local_import.publish',
-            'import', ${input.importId}, ${JSON.stringify(parsed.manifest.counts)}::jsonb, ${`import:${input.importId}`}
+            'import', ${input.importId}, ${transaction.json(parsed.manifest.counts)}, ${`import:${input.importId}`}
           )
         `;
         return { status: "published" as const, projects: parsed.projects.length, assets: parsed.assets.length };

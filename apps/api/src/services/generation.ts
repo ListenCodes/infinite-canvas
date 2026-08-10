@@ -17,6 +17,7 @@ import {
   type ActiveJobsSnapshot,
   modelListResponseSchema,
 } from "@infinite-canvas/contracts";
+import { jsonParameter } from "@infinite-canvas/db";
 import { z } from "zod";
 
 import type { Sql, TransactionSql } from "../database.js";
@@ -535,8 +536,8 @@ export class GenerationService {
               model_snapshot, price_snapshot, input_snapshot, estimated_credits
             ) values (
               ${jobId}, ${project.workspace_id}, ${batchId}, ${slotIndex}, ${input.kind}, ${model.model_config_id},
-              ${JSON.stringify(modelSnapshot)}::jsonb, ${JSON.stringify(priceSnapshot)}::jsonb,
-              ${JSON.stringify(inputSnapshot)}::jsonb, ${unitCredits.toString()}::bigint
+              ${jsonParameter(transaction, modelSnapshot)}, ${jsonParameter(transaction, priceSnapshot)},
+              ${jsonParameter(transaction, inputSnapshot)}, ${unitCredits.toString()}::bigint
             )
           `;
           await transaction`
@@ -570,7 +571,7 @@ export class GenerationService {
             values (
               ${this.createId()}, ${project.workspace_id}, 'generation.job.requested', ${jobId},
               ${`generation.job.requested:${attemptId}`},
-              ${JSON.stringify({
+              ${transaction.json({
                 schemaVersion: 2,
                 workflowName: "media-generation-v2",
                 workspaceId: project.workspace_id,
@@ -581,7 +582,7 @@ export class GenerationService {
                 capability: input.kind,
                 channelId: model.channel_id,
                 capacity: modelSnapshot.capacity,
-              })}::jsonb
+              })}
             )
           `;
           const event = await transaction<{ sequence: string }[]>`
@@ -590,7 +591,7 @@ export class GenerationService {
             ) values (
               ${project.workspace_id}, 'job', ${jobId}, ${project.id}, ${batchId}, ${jobId}, ${attemptId},
               'generation.job.created',
-              ${JSON.stringify({ slotIndex, slotId, attemptNo: 1, jobVersion: 0, status: "queued" })}::jsonb
+              ${transaction.json({ slotIndex, slotId, attemptNo: 1, jobVersion: 0, status: "queued" })}
             ) returning sequence::text
           `;
           eventCursor = event[0]?.sequence ?? eventCursor;
@@ -622,7 +623,7 @@ export class GenerationService {
         });
         await transaction`
           update idempotency_requests
-          set status = 'completed', response_status = 202, response_body = ${JSON.stringify(response)}::jsonb, updated_at = now()
+          set status = 'completed', response_status = 202, response_body = ${transaction.json(response)}, updated_at = now()
           where id = ${request.id}
         `;
         return response;
@@ -1022,7 +1023,7 @@ export class GenerationService {
         ) values (
           ${job.workspace_id}, 'job', ${jobId}, ${job.project_id}, ${job.batch_id}, ${jobId}, ${attemptId},
           'generation.job.state_changed',
-          ${JSON.stringify({ status: "queued", attemptNo, jobVersion: version, retry: true })}::jsonb
+          ${transaction.json({ status: "queued", attemptNo, jobVersion: version, retry: true })}
         )
       `;
       await transaction`select app.refresh_generation_batch(${job.batch_id})`;
@@ -1038,7 +1039,7 @@ export class GenerationService {
       });
       await transaction`
         update idempotency_requests
-        set status = 'completed', response_status = 202, response_body = ${JSON.stringify(response)}::jsonb, updated_at = now()
+        set status = 'completed', response_status = 202, response_body = ${transaction.json(response)}, updated_at = now()
         where id = ${retryRequest.id}
       `;
       return response;
@@ -1109,7 +1110,7 @@ export class GenerationService {
           values (
             ${this.createId()}, ${job.workspace_id}, 'generation.job.cancel_requested', ${jobId},
             ${`generation.job.cancel_requested:${job.attempt_id}`},
-            ${JSON.stringify({ jobId, attemptId: job.attempt_id })}::jsonb
+            ${transaction.json({ jobId, attemptId: job.attempt_id })}
           ) on conflict (dedupe_key) do nothing
         `;
       }
@@ -1125,7 +1126,7 @@ export class GenerationService {
           workspace_id, aggregate_type, aggregate_id, project_id, batch_id, job_id, attempt_id, type, payload
         ) values (
           ${job.workspace_id}, 'job', ${jobId}, ${job.project_id}, ${job.batch_id}, ${jobId}, ${job.attempt_id},
-          'generation.job.cancel_requested', ${JSON.stringify({ status, attemptNo: job.attempt_no, jobVersion: updatedJobs[0]?.version })}::jsonb
+          'generation.job.cancel_requested', ${transaction.json({ status, attemptNo: job.attempt_no, jobVersion: updatedJobs[0]?.version })}
         )
       `;
       await transaction`select app.refresh_generation_batch(${job.batch_id})`;

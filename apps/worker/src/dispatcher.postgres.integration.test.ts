@@ -4,6 +4,7 @@ import { test } from "node:test";
 
 import postgres from "postgres";
 import { generationWorkflowInputSchema } from "@infinite-canvas/contracts";
+import { jsonParameter } from "@infinite-canvas/db";
 import { AdapterRegistry } from "@infinite-canvas/provider-adapters";
 
 import { loadWorkerConfig } from "./config.js";
@@ -136,9 +137,9 @@ test(
             model_snapshot, price_snapshot, input_snapshot, estimated_credits
           ) values (
             ${extraJobId}, ${template.workspaceId}, ${template.batchId}, 99, ${template.capability},
-            ${templateRow.model_config_id}, ${JSON.stringify(templateRow.model_snapshot)}::jsonb,
-            ${JSON.stringify(templateRow.price_snapshot)}::jsonb,
-            ${JSON.stringify(templateRow.input_snapshot)}::jsonb, ${templateRow.estimated_credits}::bigint
+            ${templateRow.model_config_id}, ${jsonParameter(transaction, templateRow.model_snapshot)},
+            ${jsonParameter(transaction, templateRow.price_snapshot)},
+            ${jsonParameter(transaction, templateRow.input_snapshot)}, ${templateRow.estimated_credits}::bigint
           )
         `;
         await transaction`
@@ -310,7 +311,7 @@ test(
           from outbox_events where id = ${ambiguousOutbox.id}
         `;
         await transaction`
-          update outbox_events set payload = ${JSON.stringify(ambiguousOutbox.payload)}::jsonb, available_at = now()
+          update outbox_events set payload = ${jsonParameter(transaction, ambiguousOutbox.payload)}, available_at = now()
           where id = ${ambiguousOutbox.id}
         `;
         return rows[0]!;
@@ -411,7 +412,7 @@ test(
             id, workspace_id, topic, aggregate_id, dedupe_key, payload, attempts, available_at, created_at
           ) values (
             ${outboxId}, ${workspaceId}, 'generation.job.requested', ${current.job_id}, ${`integration-stale:${outboxId}`},
-            ${JSON.stringify({
+            ${transaction.json({
               schemaVersion: 2,
               workflowName: "media-generation-v2",
               workspaceId,
@@ -422,7 +423,7 @@ test(
               capability: current.capability,
               channelId: current.channel_id,
               capacity: integrationCapacity(current.capability),
-            })}::jsonb,
+            })},
             9, now() - interval '1 second', now() - interval '31 minutes'
           )
         `;
@@ -727,7 +728,7 @@ test(
             id, workspace_id, topic, aggregate_id, dedupe_key, payload, status, dispatch_started_token
           ) values (
             ${randomUUID()}, ${workspaceId}, 'generation.job.requested', ${current.job_id},
-            ${`generation.job.stale-marker:${current.attempt_id}`}, ${JSON.stringify(oldPayload)}::jsonb,
+            ${`generation.job.stale-marker:${current.attempt_id}`}, ${transaction.json(oldPayload)},
             'pending', ${current.dispatch_token}::uuid
           )
           returning id

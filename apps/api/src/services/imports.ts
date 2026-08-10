@@ -65,7 +65,7 @@ export class ImportService {
           object_key, manifest_sha256, counts_json
         ) values (
           ${importId}, ${workspaceId}, ${userId}, ${parsed.manifest.clientExportId}, 1, 'uploaded',
-          ${objectKey}, ${parsed.manifestSha256}, ${JSON.stringify(parsed.manifest.counts)}::jsonb
+          ${objectKey}, ${parsed.manifestSha256}, ${transaction.json(parsed.manifest.counts)}
         ) on conflict (user_id, client_export_id) do nothing
       `;
       const existing = await transaction<ImportRow[]>`
@@ -128,14 +128,14 @@ export class ImportService {
           values (
             ${this.createId()}, ${claimed.workspaceId}, 'data.import.requested', ${current.id},
             ${`data.import.requested:${current.id}`},
-            ${JSON.stringify({
+            ${transaction.json({
               schemaVersion: 1,
               workflowName: "local-data-import-v1",
               importId: current.id,
               workspaceId: claimed.workspaceId,
               userId,
               objectKey: claimed.objectKey,
-            })}::jsonb
+            })}
           ) on conflict (dedupe_key) do update
             set status = case when outbox_events.status = 'dead' then 'pending'::outbox_status else outbox_events.status end,
                 available_at = now(), updated_at = now()

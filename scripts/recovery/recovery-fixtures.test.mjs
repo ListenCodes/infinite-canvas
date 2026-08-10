@@ -425,7 +425,7 @@ test("recovery topology isolates the Hatchet observer from application data and 
   for (const required of ["business-db:", "hatchet-db:", "hatchet-lite:", "moto:", "recovery-audit:", "hatchet-terminal-observer:"]) {
     assert.ok(compose.includes(required), required);
   }
-  const dynamicLoopbackPort = (target) => ({ target, published: "49152-65535", host_ip: "127.0.0.1", protocol: "tcp" });
+  const dynamicLoopbackPort = (target) => ({ target, published: "0", host_ip: "127.0.0.1", protocol: "tcp" });
   assert.deepEqual(parsed.services["business-db"].ports, [dynamicLoopbackPort(5432)]);
   assert.deepEqual(parsed.services["hatchet-db"].ports, [dynamicLoopbackPort(5432)]);
   assert.deepEqual(parsed.services.moto.ports, [dynamicLoopbackPort(5000)]);

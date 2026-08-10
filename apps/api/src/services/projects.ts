@@ -1,4 +1,5 @@
 import { createProjectRequestSchema, projectProjectionSchema, sessionBootstrapResponseSchema, updateProjectRequestSchema, type ProjectProjection, type SessionBootstrapResponse } from "@infinite-canvas/contracts";
+import { jsonParameter } from "@infinite-canvas/db";
 
 import type { Sql, TransactionSql } from "../database.js";
 import { setServiceContext, setUserContext } from "../database.js";
@@ -226,7 +227,7 @@ export class ProjectService {
         const projectId = this.createId();
         rows = await transaction<ProjectRow[]>`
         insert into projects (id, workspace_id, created_by, client_project_id, title, document_json, updated_by)
-        values (${projectId}, ${workspaceId}, ${userId}, ${clientProjectId}, ${input.title}, ${JSON.stringify(input.documentJson)}::jsonb, ${userId})
+        values (${projectId}, ${workspaceId}, ${userId}, ${clientProjectId}, ${input.title}, ${jsonParameter(transaction, input.documentJson)}, ${userId})
         on conflict (workspace_id, created_by, client_project_id) do nothing
         returning id, workspace_id, title, document_json, version, created_at, updated_at
       `;
@@ -244,13 +245,13 @@ export class ProjectService {
       if (!project) throw new Error("Project binding could not be resolved");
       if (created) await transaction`
         insert into project_versions (id, workspace_id, project_id, version, snapshot_json, reason, created_by)
-        values (${this.createId()}, ${workspaceId}, ${project.id}, 1, ${JSON.stringify(input.documentJson)}::jsonb, 'create', ${userId})
+        values (${this.createId()}, ${workspaceId}, ${project.id}, 1, ${jsonParameter(transaction, input.documentJson)}, 'create', ${userId})
       `;
       const response = projectProjection(project);
       await transaction`
         update idempotency_requests
         set status = 'completed', response_status = 201,
-            response_body = ${JSON.stringify(response)}::jsonb, updated_at = now()
+            response_body = ${jsonParameter(transaction, response)}, updated_at = now()
         where id = ${request.id}
       `;
       return response;
@@ -263,7 +264,7 @@ export class ProjectService {
       await assertCloudProjectsEnabled(transaction, userId);
       const rows = await transaction<ProjectRow[]>`
         update projects project
-        set title = ${input.title}, document_json = ${JSON.stringify(input.documentJson)}::jsonb,
+        set title = ${input.title}, document_json = ${jsonParameter(transaction, input.documentJson)},
             version = project.version + 1, updated_by = ${userId}, updated_at = now()
         where project.id = ${projectId} and project.version = ${input.version} and project.deleted_at is null
           and exists (
@@ -286,7 +287,7 @@ export class ProjectService {
       await transaction`
         insert into project_versions (id, workspace_id, project_id, version, snapshot_json, reason, created_by)
         values (${this.createId()}, ${project.workspace_id}, ${project.id}, ${project.version},
-                ${JSON.stringify(input.documentJson)}::jsonb, 'save', ${userId})
+                ${jsonParameter(transaction, input.documentJson)}, 'save', ${userId})
       `;
       await transaction`
         insert into generation_job_events (
