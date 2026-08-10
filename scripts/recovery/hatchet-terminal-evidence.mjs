@@ -113,13 +113,23 @@ export async function observeTerminalRun(client, runId, options = {}) {
 }
 
 export async function terminalRunInventory(client, options = {}) {
+  const limit = 1_000;
   const page = await withTimeout(
-    client.runs.list({ onlyTasks: true, limit: 1_000, includePayloads: true }),
+    client.runs.list({ onlyTasks: true, limit, includePayloads: true }),
     options.requestTimeoutMs ?? 10_000,
     "Hatchet run inventory request timed out",
   );
-  if (page?.pagination?.next_page) throw new Error("Hatchet run inventory exceeded the single-page recovery bound");
-  return (page?.rows ?? []).map((row) => ({
+  const rows = page?.rows ?? [];
+  const currentPage = page?.pagination?.current_page;
+  const numPages = page?.pagination?.num_pages;
+  const hasPagination = currentPage !== undefined || numPages !== undefined;
+  if (hasPagination && (!Number.isInteger(currentPage) || currentPage < 1 || !Number.isInteger(numPages) || numPages < 0)) {
+    throw new Error("Hatchet run inventory returned invalid pagination metadata");
+  }
+  if ((hasPagination && numPages > currentPage) || (!hasPagination && rows.length >= limit) || rows.length > limit) {
+    throw new Error("Hatchet run inventory exceeded the single-page recovery bound");
+  }
+  return rows.map((row) => ({
     workflowRunExternalId: row.workflowRunExternalId,
     taskExternalId: row.taskExternalId,
     workflowName: row.workflowName ?? null,

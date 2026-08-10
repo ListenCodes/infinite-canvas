@@ -11,6 +11,7 @@ import {
   canonicalizeTerminalRunObservation,
   jsonHash,
   observeTerminalRun,
+  terminalRunInventory,
 } from "./hatchet-terminal-evidence.mjs";
 import {
   createTerminalRun,
@@ -144,6 +145,37 @@ test("terminal run evidence requires matching completed REST and gRPC observatio
     () => canonicalizeTerminalRunObservation(runId, { ...rest, tasks: [] }, details),
     /exactly one REST task/,
   );
+});
+
+test("terminal run inventory uses total pages instead of Hatchet's unconditional next page", async () => {
+  const row = {
+    workflowRunExternalId: "20000000-0000-4000-8000-000000000010",
+    taskExternalId: "20000000-0000-4000-8000-000000000011",
+    workflowName: TERMINAL_PROBE_TASK,
+    status: "COMPLETED",
+    input: { input: { nonce: "a".repeat(64) } },
+  };
+  const client = {
+    runs: {
+      list: async () => ({
+        rows: [row],
+        pagination: { current_page: 1, next_page: 2, num_pages: 1 },
+      }),
+    },
+  };
+  assert.equal((await terminalRunInventory(client)).length, 1);
+
+  client.runs.list = async () => ({
+    rows: [row],
+    pagination: { current_page: 1, next_page: 2, num_pages: 2 },
+  });
+  await assert.rejects(terminalRunInventory(client), /exceeded the single-page recovery bound/);
+
+  client.runs.list = async () => ({
+    rows: [row],
+    pagination: { current_page: 1, next_page: 2 },
+  });
+  await assert.rejects(terminalRunInventory(client), /invalid pagination metadata/);
 });
 
 test("source probe creates one run while restored verification is query-only", async () => {
