@@ -849,7 +849,10 @@ test("ten concurrent idempotent creates and failed-slot retries preserve exact c
       );
       await sql.begin(async (transaction) => {
         await transaction`select set_config('app.service_role', 'on', true)`;
-        await transaction`update workspaces set status = 'suspended' where id = ${workspaceId}`;
+        await transaction`
+          update workspaces set status = 'suspended'
+          where id in (${workspaceId}, ${secondWorkspaceId}, ${providerCreateWorkspaceId})
+        `;
       });
       const assertCode = (code: string) => (error: unknown) =>
         typeof error === "object" && error !== null && "code" in error && error.code === code;
@@ -865,6 +868,13 @@ test("ten concurrent idempotent creates and failed-slot retries preserve exact c
         ),
         assertCode("workspace_write_forbidden"),
       );
+      await sql.begin(async (transaction) => {
+        await transaction`select set_config('app.service_role', 'on', true)`;
+        await transaction`
+          update workspaces set status = 'active'
+          where id in (${secondWorkspaceId}, ${providerCreateWorkspaceId})
+        `;
+      });
       await assert.rejects(
         assetService.createUploadIntent(
           userId,
