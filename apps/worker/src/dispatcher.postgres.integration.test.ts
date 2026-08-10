@@ -498,7 +498,7 @@ test(
           where workspace_id = ${workspaceId} and status = 'pending'
         `;
       });
-      const recoveryConfig = { ...config, OUTBOX_BATCH_SIZE: 50 };
+      const recoveryConfig = { ...config, OUTBOX_BATCH_SIZE: 3 };
       const first = new OutboxDispatcher(
         sql,
         hatchet as never,
