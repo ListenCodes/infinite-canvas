@@ -427,13 +427,13 @@ test("real PostgreSQL enforces migrations, runtime roles, RLS, and LISTEN/NOTIFY
         wallets: 1,
         ledger: 1,
       });
-      assert.deepEqual(
-        await transaction<{ id: string }[]>`update assets set deleted_at = now() where id = ${assetB} returning id`,
-        [],
+      assert.equal(
+        (await transaction<{ id: string }[]>`update assets set deleted_at = now() where id = ${assetB} returning id`).length,
+        0,
       );
-      assert.deepEqual(
-        await transaction<{ id: string }[]>`update projects set title = 'cross-tenant-write' where id = ${projectB} returning id`,
-        [],
+      assert.equal(
+        (await transaction<{ id: string }[]>`update projects set title = 'cross-tenant-write' where id = ${projectB} returning id`).length,
+        0,
       );
     });
 
@@ -491,8 +491,8 @@ test("real PostgreSQL enforces migrations, runtime roles, RLS, and LISTEN/NOTIFY
       await attacker`select set_config('app.user_id', '', false), set_config('app.service_role', 'on', false)`;
       const forged = await attacker<{ allowed: boolean }[]>`select app.has_workspace_access(${workspaceA}) as allowed`;
       assert.equal(forged[0]?.allowed, false);
-      assert.deepEqual(await attacker<{ id: string }[]>`select id from projects order by id`, []);
-      assert.deepEqual(await attacker<{ id: string }[]>`update projects set title = 'stolen' where id = ${projectA} returning id`, []);
+      assert.equal((await attacker<{ id: string }[]>`select id from projects order by id`).length, 0);
+      assert.equal((await attacker<{ id: string }[]>`update projects set title = 'stolen' where id = ${projectA} returning id`).length, 0);
     } finally {
       await attacker.end();
     }
