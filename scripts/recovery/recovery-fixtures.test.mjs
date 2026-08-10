@@ -494,6 +494,14 @@ test("recovery topology isolates the Hatchet observer from application data and 
   for (const forbidden of [".task(", ".worker(", "runNoWait"]) assert.doesNotMatch(verifier, new RegExp(forbidden.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 });
 
+test("recovery fixtures establish capacity policy before generation attempts", async () => {
+  const fixtures = await readFile(resolve(repository, "scripts/recovery/recovery-fixtures.mjs"), "utf8");
+  const policy = fixtures.indexOf("insert into provider_channel_capacity_policies");
+  const attempts = fixtures.indexOf("insert into generation_attempts");
+  assert.ok(policy >= 0);
+  assert.ok(attempts > policy);
+});
+
 test("drill emits only a redacted report and cleans exact temporary projects", async () => {
   const script = await readFile(resolve(repository, "scripts/recovery/run-local-drill.mjs"), "utf8");
   assert.match(script, /redactAudit/);

@@ -203,6 +203,11 @@ export async function seedRecoveryFixtures({ businessUrl, s3Endpoint, terminalRu
         values (${fixtureIds.model}, ${fixtureIds.channel}, 'recovery-model', 'image', 'openai-images', 1, 1, '{}'::jsonb)
       `;
       await transaction`
+        insert into provider_channel_capacity_policies (
+          channel_id, capability, version, concurrency_limit, rate_limit_per_minute
+        ) values (${fixtureIds.channel}, 'image', 1, 4, 60)
+      `;
+      await transaction`
         insert into idempotency_requests (id, workspace_id, operation, key, request_hash, status, response_status, response_body, expires_at)
         values
           (${fixtureIds.idempotency}, ${fixtureIds.workspaceA}, 'batch.create', 'recovery-drill-batch', ${"a".repeat(64)}, 'completed', 202, '{}'::jsonb, now() + interval '7 days'),
