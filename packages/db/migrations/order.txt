@@ -1,0 +1,20 @@
+# Append-only migration order. Never insert, reorder, or remove a line after release.
+drizzle/0000_glossy_zeigeist.sql
+drizzle/0001_round_malice.sql
+drizzle/0002_gifted_killraven.sql
+custom/0002_runtime_invariants.sql
+drizzle/0003_steady_sunspot.sql
+drizzle/0004_public_carlie_cooper.sql
+custom/0004_import_links.sql
+drizzle/0005_volatile_unus.sql
+custom/0005_import_mapping_policy.sql
+drizzle/0006_optimal_hannibal_king.sql
+custom/0006_integrity_and_batch.sql
+drizzle/0007_pale_miek.sql
+custom/0007_runtime_role_safety.sql
+custom/0009_attempt_recovery_claim.sql
+drizzle/0008_swift_the_professor.sql
+custom/0010_platform_idempotency.sql
+custom/0011_executor_dispatch_fence.sql
+drizzle/0009_adorable_captain_midlands.sql
+drizzle/0010_clammy_susan_delgado.sql

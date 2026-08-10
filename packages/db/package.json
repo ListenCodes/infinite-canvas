@@ -1,0 +1,33 @@
+{
+  "name": "@infinite-canvas/db",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test src/*.test.ts",
+    "test:postgres": "tsx --test src/postgres.integration.test.ts",
+    "generate": "drizzle-kit generate --config drizzle.config.ts",
+    "migrate": "tsx src/migrate.ts",
+    "provision:roles": "tsx src/provision-runtime-roles.ts",
+    "rollback": "tsx src/rollback.ts"
+  },
+  "dependencies": {
+    "@infinite-canvas/contracts": "0.1.0",
+    "drizzle-orm": "0.45.2",
+    "postgres": "3.4.9",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.5.4",
+    "drizzle-kit": "0.31.10"
+  }
+}

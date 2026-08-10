@@ -1,0 +1,83 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1786297706422,
+      "tag": "0000_glossy_zeigeist",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1786297875309,
+      "tag": "0001_round_malice",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1786298159531,
+      "tag": "0002_gifted_killraven",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1786299645145,
+      "tag": "0003_steady_sunspot",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1786299826311,
+      "tag": "0004_public_carlie_cooper",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1786308835370,
+      "tag": "0005_volatile_unus",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1786312309109,
+      "tag": "0006_optimal_hannibal_king",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1786313754181,
+      "tag": "0007_pale_miek",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1786319848141,
+      "tag": "0008_swift_the_professor",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1786321519540,
+      "tag": "0009_adorable_captain_midlands",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1786324216304,
+      "tag": "0010_clammy_susan_delgado",
+      "breakpoints": true
+    }
+  ]
+}

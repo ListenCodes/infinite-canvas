@@ -1,0 +1,1 @@
+ALTER TABLE "outbox_events" ADD COLUMN "dispatch_started_token" uuid;

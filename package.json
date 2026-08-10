@@ -1,0 +1,39 @@
+{
+  "name": "infinite-canvas-services",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0 <25"
+  },
+  "workspaces": [
+    "apps/api",
+    "apps/worker",
+    "packages/*"
+  ],
+  "scripts": {
+    "build:libs": "npm run build -w @infinite-canvas/contracts && npm run build -w @infinite-canvas/domain && npm run build -w @infinite-canvas/observability && npm run build -w @infinite-canvas/importer && npm run build -w @infinite-canvas/provider-adapters && npm run build -w @infinite-canvas/db",
+    "build": "npm run build -w @infinite-canvas/contracts && npm run build -w @infinite-canvas/domain && npm run build -w @infinite-canvas/observability && npm run build -w @infinite-canvas/importer && npm run build -w @infinite-canvas/provider-adapters && npm run build -w @infinite-canvas/db && npm run build -w @infinite-canvas/api && npm run build -w @infinite-canvas/worker",
+    "pretypecheck": "npm run build:libs",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "pretest": "npm run build:libs",
+    "test": "npm run test --workspaces --if-present",
+    "test:postgres": "node scripts/run-postgres-tests.mjs",
+    "recovery:audit": "npm run recovery:audit -w @infinite-canvas/worker",
+    "recovery:drill": "node scripts/recovery/run-local-drill.mjs",
+    "verify:recovery-boundary": "node scripts/verify-recovery-audit-boundary.mjs",
+    "test:deployment-config": "node --test scripts/validate-deployment-config.test.mjs scripts/recovery/recovery-fixtures.test.mjs",
+    "test:unit": "npm run test -w @infinite-canvas/contracts && npm run test -w @infinite-canvas/domain && npm run test -w @infinite-canvas/provider-adapters",
+    "db:generate": "npm run generate -w @infinite-canvas/db",
+    "db:migrate": "npm run migrate -w @infinite-canvas/db",
+    "db:provision-roles": "npm run provision:roles -w @infinite-canvas/db",
+    "db:rollback": "npm run rollback -w @infinite-canvas/db"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "postgres": "3.4.9",
+    "tsx": "4.23.11",
+    "typescript": "7.0.2",
+    "yaml": "^2.9.0"
+  }
+}

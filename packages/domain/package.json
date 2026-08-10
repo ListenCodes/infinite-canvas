@@ -1,0 +1,24 @@
+{
+  "name": "@infinite-canvas/domain",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test src/*.test.ts"
+  },
+  "dependencies": {
+    "@infinite-canvas/contracts": "0.1.0",
+    "ipaddr.js": "2.5.0",
+    "sharp": "0.35.3",
+    "undici": "8.10.0"
+  }
+}
