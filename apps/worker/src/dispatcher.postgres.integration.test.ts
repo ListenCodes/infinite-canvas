@@ -642,7 +642,7 @@ test(
         `;
         return { ...current, outbox_id: outboxId };
       });
-      assert.equal(await first.dispatchOnce(), 1);
+      assert.equal(await outageDispatcher.dispatchOnce(), 1);
       const staleOutboxResult = await sql.begin(async (transaction) => {
         await transaction`select set_config('app.service_role', 'on', true)`;
         return transaction<
