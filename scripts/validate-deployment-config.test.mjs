@@ -673,4 +673,37 @@ test("PostgreSQL fixture types dynamic role parameters before format", async () 
     runner,
     /\$\{migrationRole\}\s*,\s*\$\{migrationPassword\}\s*\n/,
   );
+
+  const provisioner = await readFile(
+    resolve(repository, "packages/db/src/provision-runtime-roles.ts"),
+    "utf8",
+  );
+  assert.match(provisioner, /\$\{role\}::text, \$\{password\}::text/);
+  assert.match(
+    provisioner,
+    /\$\{environment\.BUSINESS_DATABASE_OBJECT_OWNER_ROLE\}::text/,
+  );
+  assert.match(
+    provisioner,
+    /\$\{environment\.BUSINESS_DATABASE_RECOVERY_AUDIT_ROLE\}::text/,
+  );
+  const formatCalls = provisioner.match(
+    /format\([\s\S]*?\)(?=\s*(?:as command|union all select format|`))/g,
+  );
+  assert.ok(formatCalls && formatCalls.length >= 10);
+  for (const call of formatCalls) {
+    assert.doesNotMatch(
+      call,
+      /\$\{(?:role|password|environment\.BUSINESS_DATABASE_(?:OBJECT_OWNER|RECOVERY_AUDIT)_ROLE)\}(?!::text)/,
+    );
+  }
+
+  const postgresTest = await readFile(
+    resolve(repository, "packages/db/src/postgres.integration.test.ts"),
+    "utf8",
+  );
+  assert.equal(
+    postgresTest.match(/\$\{attackerPassword\}::text/g)?.length,
+    2,
+  );
 });

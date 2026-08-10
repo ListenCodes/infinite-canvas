@@ -33,11 +33,11 @@ async function executeFormatted(sql: ProvisionSql, rows: Promise<{ command: stri
 
 async function ensureLoginRole(sql: ProvisionSql, role: string, password: string): Promise<void> {
   await executeFormatted(sql, sql<{ command: string }[]>`
-    select format('create role %I login noinherit nosuperuser nocreatedb nocreaterole noreplication nobypassrls password %L', ${role}, ${password}) as command
+    select format('create role %I login noinherit nosuperuser nocreatedb nocreaterole noreplication nobypassrls password %L', ${role}::text, ${password}::text) as command
     where not exists (select 1 from pg_roles where rolname = ${role})
   `);
   await executeFormatted(sql, sql<{ command: string }[]>`
-    select format('alter role %I with login noinherit nosuperuser nocreatedb nocreaterole noreplication nobypassrls password %L', ${role}, ${password}) as command
+    select format('alter role %I with login noinherit nosuperuser nocreatedb nocreaterole noreplication nobypassrls password %L', ${role}::text, ${password}::text) as command
   `);
 }
 
@@ -95,7 +95,7 @@ export async function provisionRuntimeRoles(rawEnvironment: NodeJS.ProcessEnv): 
     await executeFormatted(transaction, transaction<{ command: string }[]>`
       select format(
         'alter default privileges for role %I revoke execute on functions from public',
-        ${environment.BUSINESS_DATABASE_OBJECT_OWNER_ROLE}
+        ${environment.BUSINESS_DATABASE_OBJECT_OWNER_ROLE}::text
       ) as command
     `);
     await transaction.unsafe("revoke execute on all functions in schema app from public");
@@ -114,47 +114,47 @@ export async function provisionRuntimeRoles(rawEnvironment: NodeJS.ProcessEnv): 
       .join(", ");
     for (const role of [environment.BUSINESS_DATABASE_API_ROLE, environment.BUSINESS_DATABASE_WORKER_ROLE]) {
       await executeFormatted(transaction, transaction<{ command: string }[]>`
-        select format('grant infinite_canvas_service to %I', ${role}) as command
-        union all select format('grant connect on database %I to %I', current_database(), ${role})
-        union all select format('grant usage on schema public, app to %I', ${role})
-        union all select format('grant usage, select on all sequences in schema public to %I', ${role})
-        union all select format('grant execute on all functions in schema app to %I', ${role})
+        select format('grant infinite_canvas_service to %I', ${role}::text) as command
+        union all select format('grant connect on database %I to %I', current_database(), ${role}::text)
+        union all select format('grant usage on schema public, app to %I', ${role}::text)
+        union all select format('grant usage, select on all sequences in schema public to %I', ${role}::text)
+        union all select format('grant execute on all functions in schema app to %I', ${role}::text)
         union all select format(
           'alter default privileges for role %I in schema app grant execute on functions to %I',
-          ${environment.BUSINESS_DATABASE_OBJECT_OWNER_ROLE}, ${role}
+          ${environment.BUSINESS_DATABASE_OBJECT_OWNER_ROLE}::text, ${role}::text
         )
         union all select format(
           'alter default privileges for role %I in schema public grant select, insert, update, delete on tables to %I',
-          ${environment.BUSINESS_DATABASE_OBJECT_OWNER_ROLE}, ${role}
+          ${environment.BUSINESS_DATABASE_OBJECT_OWNER_ROLE}::text, ${role}::text
         )
         union all select format(
           'alter default privileges for role %I in schema public grant usage, select on sequences to %I',
-          ${environment.BUSINESS_DATABASE_OBJECT_OWNER_ROLE}, ${role}
+          ${environment.BUSINESS_DATABASE_OBJECT_OWNER_ROLE}::text, ${role}::text
         )
       `);
       if (tableList) {
         await executeFormatted(transaction, transaction<{ command: string }[]>`
-          select format(${`grant select, insert, update, delete on table ${tableList} to %I`}, ${role}) as command
+          select format(${`grant select, insert, update, delete on table ${tableList} to %I`}, ${role}::text) as command
         `);
       }
     }
     await executeFormatted(transaction, transaction<{ command: string }[]>`
-      select format('grant infinite_canvas_service to %I', ${environment.BUSINESS_DATABASE_RECOVERY_AUDIT_ROLE}) as command
-      union all select format('grant connect on database %I to %I', current_database(), ${environment.BUSINESS_DATABASE_RECOVERY_AUDIT_ROLE})
-      union all select format('grant usage on schema public, app to %I', ${environment.BUSINESS_DATABASE_RECOVERY_AUDIT_ROLE})
-      union all select format('grant select on table app_schema_migrations to %I', ${environment.BUSINESS_DATABASE_RECOVERY_AUDIT_ROLE})
+      select format('grant infinite_canvas_service to %I', ${environment.BUSINESS_DATABASE_RECOVERY_AUDIT_ROLE}::text) as command
+      union all select format('grant connect on database %I to %I', current_database(), ${environment.BUSINESS_DATABASE_RECOVERY_AUDIT_ROLE}::text)
+      union all select format('grant usage on schema public, app to %I', ${environment.BUSINESS_DATABASE_RECOVERY_AUDIT_ROLE}::text)
+      union all select format('grant select on table app_schema_migrations to %I', ${environment.BUSINESS_DATABASE_RECOVERY_AUDIT_ROLE}::text)
       union all select format(
         'grant execute on function app.current_user_id(), app.is_service_role(), app.is_platform_admin(), app.has_workspace_access(uuid, workspace_role[]) to %I',
-        ${environment.BUSINESS_DATABASE_RECOVERY_AUDIT_ROLE}
+        ${environment.BUSINESS_DATABASE_RECOVERY_AUDIT_ROLE}::text
       )
       union all select format(
         'alter default privileges for role %I in schema public grant select on tables to %I',
-        ${environment.BUSINESS_DATABASE_OBJECT_OWNER_ROLE}, ${environment.BUSINESS_DATABASE_RECOVERY_AUDIT_ROLE}
+        ${environment.BUSINESS_DATABASE_OBJECT_OWNER_ROLE}::text, ${environment.BUSINESS_DATABASE_RECOVERY_AUDIT_ROLE}::text
       )
     `);
     if (tableList) {
       await executeFormatted(transaction, transaction<{ command: string }[]>`
-        select format(${`grant select on table ${tableList} to %I`}, ${environment.BUSINESS_DATABASE_RECOVERY_AUDIT_ROLE}) as command
+        select format(${`grant select on table ${tableList} to %I`}, ${environment.BUSINESS_DATABASE_RECOVERY_AUDIT_ROLE}::text) as command
       `);
     }
     });

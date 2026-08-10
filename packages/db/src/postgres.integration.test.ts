@@ -471,10 +471,10 @@ test("real PostgreSQL enforces migrations, runtime roles, RLS, and LISTEN/NOTIFY
     });
 
     const attackerCommands = await admin<{ command: string }[]>`
-      select format('create role infinite_canvas_attacker_test login noinherit nosuperuser nobypassrls password %L', ${attackerPassword}) as command
+      select format('create role infinite_canvas_attacker_test login noinherit nosuperuser nobypassrls password %L', ${attackerPassword}::text) as command
       where not exists (select 1 from pg_roles where rolname = 'infinite_canvas_attacker_test')
       union all
-      select format('alter role infinite_canvas_attacker_test with login noinherit nosuperuser nobypassrls password %L', ${attackerPassword})
+      select format('alter role infinite_canvas_attacker_test with login noinherit nosuperuser nobypassrls password %L', ${attackerPassword}::text)
     `;
     for (const { command } of attackerCommands) await admin.unsafe(command);
     const databaseName = await admin<{ name: string }[]>`select quote_ident(current_database()) as name`;
