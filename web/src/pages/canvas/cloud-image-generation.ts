@@ -11,6 +11,7 @@ import type { ReferenceImage } from "@/types/image";
 
 import { ActiveGenerationWatchRegistry, CloudGenerationWakeChannel, runCloudGenerationEventPump, waitForCloudGenerationCursorScan } from "./cloud-generation-watch-core";
 import { resumeCloudImageBatchesCore } from "./cloud-generation-recovery-drivers";
+import { aggregateCloudImageStatus, mergeCloudImageJobStates } from "./cloud-image-state-core";
 
 type SetNodes = (updater: (nodes: CanvasNodeData[]) => CanvasNodeData[]) => void;
 const activeBatches = new ActiveGenerationWatchRegistry();
@@ -22,18 +23,18 @@ const MAX_MATERIALIZATION_ATTEMPTS = 6;
 
 function markMaterializationError(rootId: string, slotId: string, message: string, setNodes: SetNodes): void {
     setNodes((nodes) =>
-        nodes.map((node) =>
-            node.id === rootId
-                ? {
-                      ...node,
-                      metadata: {
-                          ...node.metadata,
-                          status: "error",
-                          images: node.metadata?.images?.map((image) => (image.id === slotId ? { ...image, status: "error", errorDetails: message } : image)),
-                      },
-                  }
-                : node,
-        ),
+        nodes.map((node) => {
+            if (node.id !== rootId) return node;
+            const images = node.metadata?.images?.map((image) => (image.id === slotId ? { ...image, status: "error" as const, errorDetails: message } : image));
+            return {
+                ...node,
+                metadata: {
+                    ...node.metadata,
+                    status: images?.some((image) => image.status === "success") ? "success" : "error",
+                    images,
+                },
+            };
+        }),
     );
 }
 
@@ -99,33 +100,54 @@ function updateJobs(rootId: string, jobs: readonly GenerationJobProjection[], se
     setNodes((nodes) =>
         nodes.map((node) => {
             if (node.id !== rootId) return node;
-            const bySlot = new Map(jobs.map((job) => [String(job.slotId), job]));
-            const images = (node.metadata?.images || []).map((image) => {
-                const job = bySlot.get(image.id);
-                if (!job) return image;
-                const terminalError = job.status === "failed" || job.status === "canceled" || job.status === "outcome_unknown";
-                return {
-                    ...image,
-                    status: terminalError ? ("error" as const) : job.status === "succeeded" ? image.status : ("loading" as const),
-                    errorDetails: terminalError ? job.errorMessage || job.errorCode || job.status : image.errorDetails,
-                    cloud: {
-                        ...image.cloud,
-                        batchId: job.batchId,
-                        jobId: job.jobId,
-                        slotId: job.slotId,
-                        jobVersion: job.jobVersion,
-                        attemptId: job.attemptId,
-                        attemptNo: job.attemptNo,
-                        serverStatus: job.status,
-                        ...(job.progress !== undefined ? { progress: job.progress } : {}),
-                        ...(job.assetId ? { assetId: job.assetId } : {}),
-                        retryIdempotencyKey: image.cloud?.attemptId === job.attemptId ? image.cloud.retryIdempotencyKey : undefined,
-                    },
-                } satisfies CanvasNodeImage;
-            });
-            const hasSuccess = images.some((image) => image.status === "success");
-            const active = images.some((image) => image.cloud && !["succeeded", "failed", "canceled", "outcome_unknown"].includes(image.cloud.serverStatus));
-            return { ...node, metadata: { ...node.metadata, cloudBatchId: jobs[0]?.batchId || node.metadata?.cloudBatchId, cloudIdempotencyKey: undefined, images, status: active ? "loading" : hasSuccess ? "success" : "error" } };
+            const images = mergeCloudImageJobStates(node.metadata?.images || [], jobs);
+            return { ...node, metadata: { ...node.metadata, cloudBatchId: jobs[0]?.batchId || node.metadata?.cloudBatchId, cloudIdempotencyKey: undefined, images, status: aggregateCloudImageStatus(images) } };
+        }),
+    );
+}
+
+async function materializeImageJob(rootId: string, job: GenerationJobProjection, setNodes: SetNodes, signal: AbortSignal): Promise<void> {
+    if (job.status !== "succeeded") throw new Error("Generated job is not ready for materialization");
+    if (!job.assetId) throw new Error("Generated asset metadata is incomplete");
+    const signed = await getCloudAssetUrl(job.assetId);
+    const response = await fetch(signed.signedUrl, { signal });
+    if (!response.ok) throw new Error(`Generated asset download failed with HTTP ${response.status}`);
+    const uploaded = await uploadImage(await response.blob(), { signal });
+    const imageSize = fitNodeSize(uploaded.width, uploaded.height, NODE_DEFAULT_SIZE[CanvasNodeType.Image].width, NODE_DEFAULT_SIZE[CanvasNodeType.Image].height);
+    setNodes((nodes) =>
+        nodes.map((node) => {
+            if (node.id !== rootId) return node;
+            const item: CanvasNodeImage = {
+                id: job.slotId,
+                status: "success",
+                content: uploaded.url,
+                storageKey: uploaded.storageKey,
+                naturalWidth: uploaded.width,
+                naturalHeight: uploaded.height,
+                bytes: uploaded.bytes,
+                mimeType: uploaded.mimeType,
+                cloud: { batchId: job.batchId, jobId: job.jobId, slotId: job.slotId, jobVersion: job.jobVersion, attemptId: job.attemptId, attemptNo: job.attemptNo, serverStatus: job.status, assetId: job.assetId },
+            };
+            const images = node.metadata?.images?.map((image) => (image.id === job.slotId ? item : image)) || [];
+            if (node.metadata?.primaryImageId) return { ...node, metadata: { ...node.metadata, images, status: "success" } };
+            const center = { x: node.position.x + node.width / 2, y: node.position.y + node.height / 2 };
+            return {
+                ...node,
+                ...imageSize,
+                position: { x: center.x - imageSize.width / 2, y: center.y - imageSize.height / 2 },
+                metadata: {
+                    ...node.metadata,
+                    images,
+                    status: "success",
+                    primaryImageId: job.slotId,
+                    content: item.content,
+                    storageKey: item.storageKey,
+                    naturalWidth: item.naturalWidth,
+                    naturalHeight: item.naturalHeight,
+                    bytes: item.bytes,
+                    mimeType: item.mimeType,
+                },
+            };
         }),
     );
 }
@@ -134,69 +156,36 @@ async function materializeSucceeded(rootId: string, snapshot: GenerationBatchSna
     let allMaterialized = true;
     for (const job of snapshot.jobs) {
         if (job.status !== "succeeded" || completed.has(job.jobId)) continue;
-        if (!job.assetId) {
-            markMaterializationError(rootId, job.slotId, "Generated asset metadata is incomplete", setNodes);
-            completed.add(job.jobId);
-            continue;
-        }
-        let uploaded: Awaited<ReturnType<typeof uploadImage>>;
         try {
-            const signed = await getCloudAssetUrl(job.assetId);
-            const response = await fetch(signed.signedUrl, { signal });
-            if (!response.ok) throw new Error(`Generated asset download failed with HTTP ${response.status}`);
-            uploaded = await uploadImage(await response.blob(), { signal });
+            await materializeImageJob(rootId, job, setNodes, signal);
         } catch (error) {
             if (signal.aborted) throw error;
             const attempts = (failures.get(job.jobId) ?? 0) + 1;
             failures.set(job.jobId, attempts);
             if (attempts >= MAX_MATERIALIZATION_ATTEMPTS) {
-                markMaterializationError(rootId, job.slotId, "Generated asset could not be downloaded", setNodes);
+                markMaterializationError(rootId, job.slotId, job.assetId ? "Generated asset could not be downloaded" : "Generated asset metadata is incomplete", setNodes);
                 completed.add(job.jobId);
             } else {
                 allMaterialized = false;
             }
             continue;
         }
-        const imageSize = fitNodeSize(uploaded.width, uploaded.height, NODE_DEFAULT_SIZE[CanvasNodeType.Image].width, NODE_DEFAULT_SIZE[CanvasNodeType.Image].height);
-        setNodes((nodes) =>
-            nodes.map((node) => {
-                if (node.id !== rootId) return node;
-                const item: CanvasNodeImage = {
-                    id: job.slotId,
-                    status: "success",
-                    content: uploaded.url,
-                    storageKey: uploaded.storageKey,
-                    naturalWidth: uploaded.width,
-                    naturalHeight: uploaded.height,
-                    bytes: uploaded.bytes,
-                    mimeType: uploaded.mimeType,
-                    cloud: { batchId: job.batchId, jobId: job.jobId, slotId: job.slotId, jobVersion: job.jobVersion, attemptId: job.attemptId, attemptNo: job.attemptNo, serverStatus: job.status, assetId: job.assetId },
-                };
-                const images = node.metadata?.images?.map((image) => (image.id === job.slotId ? item : image)) || [];
-                if (node.metadata?.primaryImageId) return { ...node, metadata: { ...node.metadata, images, status: "success" } };
-                const center = { x: node.position.x + node.width / 2, y: node.position.y + node.height / 2 };
-                return {
-                    ...node,
-                    ...imageSize,
-                    position: { x: center.x - imageSize.width / 2, y: center.y - imageSize.height / 2 },
-                    metadata: {
-                        ...node.metadata,
-                        images,
-                        status: "success",
-                        primaryImageId: job.slotId,
-                        content: item.content,
-                        storageKey: item.storageKey,
-                        naturalWidth: item.naturalWidth,
-                        naturalHeight: item.naturalHeight,
-                        bytes: item.bytes,
-                        mimeType: item.mimeType,
-                    },
-                };
-            }),
-        );
         completed.add(job.jobId);
     }
     return allMaterialized;
+}
+
+export async function rematerializeCloudImageJob(batchId: string, jobId: string, rootId: string, setNodes: SetNodes, signal: AbortSignal): Promise<void> {
+    const snapshot = await getCloudGenerationBatchResilient(batchId, signal);
+    const job = snapshot.jobs.find((candidate) => candidate.jobId === jobId);
+    if (!job) throw new Error("Generated image slot no longer exists");
+    updateJobs(rootId, snapshot.jobs, setNodes);
+    try {
+        await materializeImageJob(rootId, job, setNodes, signal);
+    } catch (error) {
+        if (!signal.aborted) markMaterializationError(rootId, job.slotId, error instanceof Error ? error.message : "Generated asset could not be downloaded", setNodes);
+        throw error;
+    }
 }
 
 export async function watchCloudImageBatch(batchId: string, rootId: string, setNodes: SetNodes, signal: AbortSignal): Promise<GenerationBatchSnapshot | null> {

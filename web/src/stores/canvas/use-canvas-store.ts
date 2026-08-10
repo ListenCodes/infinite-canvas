@@ -6,6 +6,7 @@ import i18n from "@/i18n";
 import { localForageStorage } from "@/lib/localforage-storage";
 import type { CanvasBackgroundMode } from "@/lib/canvas-theme";
 import type { CanvasAssistantSession, CanvasConnection, CanvasNodeData, ViewportTransform } from "@/types/canvas";
+import { OrderedPersistQueue } from "./ordered-persist-queue";
 
 export type CanvasProject = {
     id: string;
@@ -47,6 +48,17 @@ const CANVAS_STORE_KEY = "infinite-canvas:canvas_store";
 type PersistedCanvasState = Pick<CanvasStore, "projects">;
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 let queuedPersistState: PersistedCanvasState | null = null;
+const persistQueue = new OrderedPersistQueue<{ name: string; value: StorageValue<CanvasStore> }>();
+
+export async function flushCanvasPersistence(): Promise<void> {
+    if (saveTimer) {
+        clearTimeout(saveTimer);
+        saveTimer = null;
+    }
+    await persistQueue.flush(async (pending) => {
+        await localForageStorage.setItem(pending.name, JSON.stringify(pending.value));
+    });
+}
 
 const canvasStorage: PersistStorage<CanvasStore> = {
     getItem: async (name) => {
@@ -60,10 +72,10 @@ const canvasStorage: PersistStorage<CanvasStore> = {
         const nextState = value.state as PersistedCanvasState;
         if (queuedPersistState && queuedPersistState.projects === nextState.projects) return;
         queuedPersistState = nextState;
+        persistQueue.queue({ name, value });
         if (saveTimer) clearTimeout(saveTimer);
         saveTimer = setTimeout(() => {
-            saveTimer = null;
-            void localForageStorage.setItem(name, JSON.stringify(value));
+            void flushCanvasPersistence().catch(() => undefined);
         }, 400);
     },
     removeItem: (name) => localForageStorage.removeItem(name),

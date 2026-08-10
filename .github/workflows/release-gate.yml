@@ -42,6 +42,7 @@ jobs:
           npm run test:media-adapters
           npm run test:canvas-generation
           npm run test:cloud-recovery
+          npm run test:cloud-migration
           npm run build
           npm audit --omit=dev --audit-level=high
       - name: Verify browser secret boundary

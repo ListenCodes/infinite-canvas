@@ -28,6 +28,13 @@ interface VideoRecoveryNode {
 const terminalWithoutMaterialization = new Set(["failed", "canceled", "outcome_unknown"]);
 const terminal = new Set(["succeeded", ...terminalWithoutMaterialization]);
 
+export function cloudImageRetryMode(image: { status: string; cloud?: { serverStatus: string } }): "attempt" | "materialize" | null {
+    if (!image.cloud) return null;
+    if (["failed", "canceled"].includes(image.cloud.serverStatus)) return "attempt";
+    if (image.cloud.serverStatus === "succeeded" && image.status === "error") return "materialize";
+    return null;
+}
+
 export async function resumeCloudImageBatchesCore(options: {
     nodes: readonly ImageRecoveryNode[];
     signal: AbortSignal;

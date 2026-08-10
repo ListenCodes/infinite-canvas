@@ -198,6 +198,9 @@ for (const relativePath of releaseManifestArguments) {
   }
   if (manifest?.schemaVersion !== 1) errors.push(`${path}: unsupported release manifest schemaVersion`);
   const source = manifest?.source;
+  const sourceKeys = source && typeof source === "object" ? Object.keys(source).sort() : [];
+  const expectedSourceKeys = ["commit", "event", "ref", "repository", "runId"];
+  if (JSON.stringify(sourceKeys) !== JSON.stringify(expectedSourceKeys)) errors.push(`${path}: source must contain exactly repository, commit, ref, event, and runId`);
   if (!source || !/^[a-f0-9]{40}$/.test(source.commit ?? "")) errors.push(`${path}: source.commit must be a full Git SHA`);
   if (source?.repository !== "ListenCodes/infinite-canvas") errors.push(`${path}: unexpected source repository`);
   if (!Number.isSafeInteger(source?.runId)) errors.push(`${path}: invalid workflow run identity`);

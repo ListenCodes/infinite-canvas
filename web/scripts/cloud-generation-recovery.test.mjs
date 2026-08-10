@@ -3,8 +3,9 @@ import test from "node:test";
 
 import { buildCloudEventRequest, GenerationEventDecoder, newerEventCursor } from "../src/services/api/cloud-event-stream.ts";
 import { resumeCloudProjectGenerations } from "../src/pages/canvas/cloud-generation-resume.ts";
-import { resumeCloudImageBatchesCore, resumeCloudVideoBatchesCore } from "../src/pages/canvas/cloud-generation-recovery-drivers.ts";
+import { cloudImageRetryMode, resumeCloudImageBatchesCore, resumeCloudVideoBatchesCore } from "../src/pages/canvas/cloud-generation-recovery-drivers.ts";
 import { ActiveGenerationWatchRegistry, CLOUD_GENERATION_CURSOR_SCAN_MS, CloudGenerationWakeChannel, runCloudGenerationEventPump, waitForCloudGenerationCursorScan } from "../src/pages/canvas/cloud-generation-watch-core.ts";
+import { aggregateCloudImageStatus, mergeCloudImageJobStates } from "../src/pages/canvas/cloud-image-state-core.ts";
 import { clearCloudUploadRetryKey, getOrCreateCloudUploadRetryKey, rotateCloudUploadRetryKey } from "../src/services/api/cloud-upload-retry.ts";
 
 const workspaceId = "00000000-0000-4000-8000-000000000101";
@@ -80,6 +81,37 @@ test("event pump preserves cursor across EOF and waits before reconnecting", asy
     assert.equal(snapshotCalls, 2);
     assert.equal(new URL(subscriptions[1].path, "https://canvas.example").searchParams.get("cursor"), "12");
     assert.equal(subscriptions[1].headers["Last-Event-ID"], "12");
+});
+
+test("subscribe failure reloads the authoritative snapshot without submitting again", async () => {
+    const controller = new AbortController();
+    const trace = [];
+    const subscriptionCursors = [];
+    const snapshotCursors = ["10", "25"];
+    let snapshotCalls = 0;
+    await runCloudGenerationEventPump({
+        signal: controller.signal,
+        initialCursor: "12",
+        loadSnapshot: async () => {
+            const eventCursor = snapshotCursors[snapshotCalls++];
+            trace.push(`snapshot:${eventCursor}`);
+            return { projectId, eventCursor };
+        },
+        subscribe: async ({ cursor }) => {
+            trace.push(`subscribe:${cursor}`);
+            subscriptionCursors.push(cursor);
+            if (subscriptionCursors.length === 1) {
+                throw Object.assign(new Error("cursor expired"), { status: 409, code: "event_cursor_expired" });
+            }
+            controller.abort();
+        },
+        onEvent: () => assert.fail("snapshot recovery must not synthesize an event"),
+        waitForReconnect: async (delayMs) => {
+            trace.push(`wait:${delayMs}`);
+        },
+    });
+    assert.deepEqual(trace, ["snapshot:10", "subscribe:12", "wait:1500", "snapshot:25", "subscribe:25"]);
+    assert.equal(snapshotCalls, 2);
 });
 
 test("wake channel performs the five second cursor sweep and aborts immediately", async () => {
@@ -214,6 +246,85 @@ test("real image and video recovery drivers watch active and local batches witho
         ["image", "00000000-0000-4000-8000-000000000302", "node-local"],
         ["video", "00000000-0000-4000-8000-000000000304", "node-active"],
         ["video", "00000000-0000-4000-8000-000000000303", "video-local"],
+    ]);
+});
+
+test("a locally failed succeeded image retries materialization without a paid attempt", () => {
+    assert.equal(cloudImageRetryMode({ status: "error", cloud: { serverStatus: "succeeded" } }), "materialize");
+    assert.equal(cloudImageRetryMode({ status: "error", cloud: { serverStatus: "failed" } }), "attempt");
+    assert.equal(cloudImageRetryMode({ status: "success", cloud: { serverStatus: "succeeded" } }), null);
+});
+
+test("three image slots preserve success and expose independent failure reasons", () => {
+    const baseJob = {
+        batchId: "00000000-0000-4000-8000-000000000321",
+        jobVersion: 2,
+        attemptNo: 1,
+        slotIndex: 0,
+    };
+    const images = mergeCloudImageJobStates(
+        [
+            { id: "slot-1", status: "success", content: "blob:ready" },
+            { id: "slot-2", status: "loading" },
+            { id: "slot-3", status: "loading" },
+        ],
+        [
+            { ...baseJob, slotId: "slot-1", jobId: "00000000-0000-4000-8000-000000000421", attemptId: "00000000-0000-4000-8000-000000000521", status: "succeeded" },
+            { ...baseJob, slotIndex: 1, slotId: "slot-2", jobId: "00000000-0000-4000-8000-000000000422", attemptId: "00000000-0000-4000-8000-000000000522", status: "failed", errorCode: "provider_rate_limited", errorMessage: "Provider capacity was exhausted" },
+            { ...baseJob, slotIndex: 2, slotId: "slot-3", jobId: "00000000-0000-4000-8000-000000000423", attemptId: "00000000-0000-4000-8000-000000000523", status: "failed", errorCode: "content_moderation_rejected", errorMessage: "Prompt was rejected by moderation" },
+        ],
+    );
+    assert.equal(images[0].status, "success");
+    assert.equal(images[0].content, "blob:ready");
+    assert.equal(images[1].errorDetails, "Provider capacity was exhausted");
+    assert.equal(images[2].errorDetails, "Prompt was rejected by moderation");
+    assert.equal(aggregateCloudImageStatus(images), "success");
+});
+
+test("video recovery resumes the task-id, polling, and download refresh windows", async () => {
+    const watched = [];
+    const updated = [];
+    const signal = new AbortController().signal;
+    const batchIds = {
+        beforeTask: "00000000-0000-4000-8000-000000000311",
+        afterTask: "00000000-0000-4000-8000-000000000312",
+        polling: "00000000-0000-4000-8000-000000000313",
+        downloading: "00000000-0000-4000-8000-000000000314",
+    };
+    const resolvedJob = {
+        batchId: batchIds.beforeTask,
+        jobId: "00000000-0000-4000-8000-000000000411",
+        slotIndex: 0,
+        slotId: "slot-before-task",
+        status: "submitting",
+        jobVersion: 1,
+        attemptId: "00000000-0000-4000-8000-000000000511",
+        attemptNo: 1,
+    };
+    await resumeCloudVideoBatchesCore({
+        nodes: [
+            { id: "before-task", type: "video", metadata: { cloudIdempotencyKey: "create-before-task" } },
+            { id: "after-task", type: "video", metadata: { cloudBatchId: batchIds.afterTask, cloudJob: { serverStatus: "waiting_provider" } } },
+            { id: "polling", type: "video", metadata: { cloudBatchId: batchIds.polling, cloudJob: { serverStatus: "running" } } },
+            { id: "downloading", type: "video", metadata: { cloudBatchId: batchIds.downloading, cloudJob: { serverStatus: "succeeded" }, content: "", storageKey: "video:missing" } },
+        ],
+        videoNodeType: "video",
+        signal,
+        remoteProjectId: projectId,
+        updateJob: (nodeId, job) => updated.push([nodeId, job.status]),
+        watchBatch: async (batchId, nodeId) => { watched.push([batchId, nodeId]); },
+        resolveBatch: async (_projectId, key) => {
+            assert.equal(key, "create-before-task");
+            return { batchId: batchIds.beforeTask, eventCursor: "1", projectId, status: "running", jobs: [resolvedJob] };
+        },
+        hasBlob: async () => false,
+    });
+    assert.deepEqual(updated, [["before-task", "submitting"]]);
+    assert.deepEqual(watched, [
+        [batchIds.beforeTask, "before-task"],
+        [batchIds.afterTask, "after-task"],
+        [batchIds.polling, "polling"],
+        [batchIds.downloading, "downloading"],
     ]);
 });
 

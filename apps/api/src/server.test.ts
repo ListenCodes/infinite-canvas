@@ -332,6 +332,34 @@ test("metrics require the configured bearer token", async () => {
   }
 });
 
+test("platform credential canaries never appear in HTTP responses", async () => {
+  const canaries = [
+    "secret-canary-service-role-1001",
+    "secret-canary-credential-master-1002",
+    "secret-canary-database-url-1003",
+    "secret-canary-metrics-token-1004",
+  ];
+  const deps = dependencies();
+  deps.config.SUPABASE_SERVICE_ROLE_KEY = canaries[0]!;
+  deps.config.CREDENTIAL_MASTER_KEY = canaries[1]!;
+  deps.config.BUSINESS_DATABASE_URL = canaries[2]!;
+  deps.config.BUSINESS_DATABASE_LISTENER_URL = canaries[2]!;
+  deps.config.METRICS_BEARER_TOKEN = canaries[3]!;
+  const server = await buildServer(deps);
+  try {
+    const responses = await Promise.all([
+      server.inject({ method: "GET", url: "/healthz" }),
+      server.inject({ method: "GET", url: "/v1/session/bootstrap", headers: { authorization: "Bearer valid" } }),
+      server.inject({ method: "GET", url: "/metrics" }),
+      server.inject({ method: "GET", url: "/not-found" }),
+    ]);
+    const surface = responses.map((response) => `${JSON.stringify(response.headers)}\n${response.body}`).join("\n");
+    for (const canary of canaries) assert.equal(surface.includes(canary), false);
+  } finally {
+    await server.close();
+  }
+});
+
 test("generation route strips forged authority fields and keeps idempotency", async () => {
   const capture: { input?: unknown; key?: string } = {};
   const server = await buildServer(dependencies(capture));

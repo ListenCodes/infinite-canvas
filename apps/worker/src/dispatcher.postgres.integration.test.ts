@@ -8,6 +8,7 @@ import { AdapterRegistry } from "@infinite-canvas/provider-adapters";
 
 import { loadWorkerConfig } from "./config.js";
 import { OutboxDispatcher } from "./dispatcher.js";
+import { GenerationExecutor } from "./executor.js";
 import { UnknownOutcomeReconciler } from "./reconciler.js";
 import { GenerationRepository } from "./repository.js";
 
@@ -279,36 +280,139 @@ test(
         event_count: staleOutbox.event_count,
       });
 
-      const unknown = await sql.begin(async (transaction) => {
+      const unknownCandidate = await sql.begin(async (transaction) => {
         await transaction`select set_config('app.service_role', 'on', true)`;
         const rows = await transaction<
-          { attempt_id: string; job_id: string; batch_id: string }[]
+          {
+            attempt_id: string;
+            job_id: string;
+            batch_id: string;
+            project_id: string;
+            channel_id: string;
+            capability: "image" | "video";
+            adapter_type: string;
+            adapter_version: number;
+            credential_version: number;
+            dispatch_token: string;
+          }[]
         >`
-        select attempt.id as attempt_id, job.id as job_id, job.batch_id
+        select attempt.id as attempt_id, job.id as job_id, job.batch_id, batch.project_id,
+               attempt.channel_id, job.capability, attempt.adapter_type, attempt.adapter_version,
+               attempt.credential_version, attempt.executor_dispatch_token::text as dispatch_token
         from generation_attempts attempt
         join generation_jobs job on job.id = attempt.job_id and job.current_attempt_id = attempt.id
+        join generation_batches batch on batch.id = job.batch_id
         join credit_reservations reservation on reservation.attempt_id = attempt.id and reservation.status = 'reserved'
-        where attempt.workspace_id = ${workspaceId}
+        where attempt.workspace_id = ${workspaceId} and attempt.status = 'created'
         order by attempt.created_at desc limit 1
         for update of attempt, job, reservation
       `;
         const current = rows[0];
         assert.ok(current);
+        const masterKey = Buffer.alloc(32);
+        const dataKey = randomBytes(32);
+        const nonce = randomBytes(12);
         await transaction`
-        update generation_attempts
-        set status = 'outcome_unknown', outcome_unknown_at = now() - interval '24 hours',
-            reconcile_after = now() - interval '1 second', release_after = now() - interval '1 second',
-            error_code = 'provider_outcome_unknown'
-        where id = ${current.attempt_id}
+          update provider_credentials
+          set encrypted_data_key = ${encrypt(masterKey, nonce, dataKey)},
+              encrypted_secret = ${encrypt(dataKey, nonce, Buffer.from("provider-secret"))},
+              nonce = ${nonce.toString("base64")}
+          where channel_id = ${current.channel_id} and version = ${current.credential_version}
       `;
-        await transaction`update generation_jobs set status = 'outcome_unknown', version = version + 1 where id = ${current.job_id}`;
-        await transaction`select app.refresh_generation_batch(${current.batch_id})`;
+        dataKey.fill(0);
         return current;
       });
 
+      let ambiguousProviderSubmits = 0;
+      let ambiguousMaterializations = 0;
+      const ambiguousRegistry = new AdapterRegistry();
+      ambiguousRegistry.register({
+        type: unknownCandidate.adapter_type,
+        version: unknownCandidate.adapter_version,
+        capability: unknownCandidate.capability,
+        validate() {},
+        async submit() {
+          ambiguousProviderSubmits += 1;
+          throw new Error("connection reset after paid provider accepted the request");
+        },
+      });
+      const ambiguousRepository = new GenerationRepository(
+        sql,
+        config,
+        ambiguousRegistry,
+        { trustedOrigin: () => "https://storage.example" } as never,
+        randomUUID,
+      );
+      const ambiguousExecutor = new GenerationExecutor(ambiguousRepository, {
+        async materialize() {
+          ambiguousMaterializations += 1;
+          throw new Error("outcome-unknown attempt must not materialize");
+        },
+        async recoverMaterialized() {
+          return undefined;
+        },
+      });
+      const ambiguousInput = generationWorkflowInputSchema.parse({
+        schemaVersion: 1,
+        workflowName: "media-generation-v1",
+        workspaceId,
+        projectId: unknownCandidate.project_id,
+        batchId: unknownCandidate.batch_id,
+        jobId: unknownCandidate.job_id,
+        attemptId: unknownCandidate.attempt_id,
+        capability: unknownCandidate.capability,
+        channelId: unknownCandidate.channel_id,
+      });
+      const ambiguousContext = {
+        workflowRunId: "integration-lost-provider-response",
+        dispatchToken: unknownCandidate.dispatch_token,
+        signal: new AbortController().signal,
+      };
+      assert.equal((await ambiguousExecutor.execute(ambiguousInput, ambiguousContext)).outcome, "outcome_unknown");
+      assert.equal((await ambiguousExecutor.execute(ambiguousInput, ambiguousContext)).outcome, "duplicate");
+      assert.equal(ambiguousProviderSubmits, 1);
+      assert.equal(ambiguousMaterializations, 0);
+
+      const unknown = await sql.begin(async (transaction) => {
+        await transaction`select set_config('app.service_role', 'on', true)`;
+        const rows = await transaction<{
+          attempt_id: string;
+          job_id: string;
+          batch_id: string;
+          release_after: Date;
+          outcome_unknown_at: Date;
+          reconcile_after: Date;
+          attempt_status: string;
+          job_status: string;
+          reservation_status: string;
+          financial_transitions: number;
+          unknown_events: number;
+        }[]>`
+          select attempt.id as attempt_id, job.id as job_id, job.batch_id,
+                 attempt.release_after, attempt.outcome_unknown_at, attempt.reconcile_after,
+                 attempt.status::text as attempt_status, job.status::text as job_status,
+                 reservation.status::text as reservation_status,
+                 (select count(*)::int from wallet_entries where reference_type = 'attempt' and reference_id = attempt.id and kind in ('settle', 'release', 'release_after_unknown_timeout')) as financial_transitions,
+                 (select count(*)::int from generation_job_events where attempt_id = attempt.id and payload->>'status' = 'outcome_unknown') as unknown_events
+          from generation_attempts attempt
+          join generation_jobs job on job.id = attempt.job_id and job.current_attempt_id = attempt.id
+          join credit_reservations reservation on reservation.attempt_id = attempt.id
+          where attempt.id = ${unknownCandidate.attempt_id}
+        `;
+        return rows[0]!;
+      });
+      assert.equal(unknown.attempt_status, "outcome_unknown");
+      assert.equal(unknown.job_status, "outcome_unknown");
+      assert.equal(unknown.reservation_status, "reserved");
+      assert.equal(unknown.financial_transitions, 0);
+      assert.equal(unknown.unknown_events, 1);
+      assert.equal(unknown.reconcile_after.getTime() - unknown.outcome_unknown_at.getTime(), 60 * 60 * 1000);
+      assert.equal(unknown.release_after.getTime() - unknown.outcome_unknown_at.getTime(), 24 * 60 * 60 * 1000);
+
       const reconciler = new UnknownOutcomeReconciler(sql, randomUUID);
-      assert.equal(await reconciler.reconcileOnce(new Date()), 1);
-      assert.equal(await reconciler.reconcileOnce(new Date()), 0);
+      const unknownReleaseNow = new Date(unknown.release_after.getTime() + 1_000);
+      assert.equal(await reconciler.reconcileOnce(unknownReleaseNow), 1);
+      assert.equal(await reconciler.reconcileOnce(unknownReleaseNow), 0);
       const reconciled = await sql.begin(async (transaction) => {
         await transaction`select set_config('app.service_role', 'on', true)`;
         return transaction<
@@ -338,6 +442,55 @@ test(
         timeout_releases: 1,
         release_audits: 1,
       });
+      const lateSuccessBefore = await sql.begin(async (transaction) => {
+        await transaction`select set_config('app.service_role', 'on', true)`;
+        return transaction<{
+          available: string;
+          reserved: string;
+          risk_entries: number;
+          timeout_releases: number;
+          settlements: number;
+        }[]>`
+          select
+            wallet.available::text,
+            wallet.reserved::text,
+            (select count(*)::int from platform_risk_entries where attempt_id = ${unknown.attempt_id}) as risk_entries,
+            (select count(*)::int from wallet_entries where reference_type = 'attempt' and reference_id = ${unknown.attempt_id} and kind = 'release_after_unknown_timeout') as timeout_releases,
+            (select count(*)::int from wallet_entries where reference_type = 'attempt' and reference_id = ${unknown.attempt_id} and kind = 'settle') as settlements
+          from wallet_accounts wallet where wallet.workspace_id = ${workspaceId}
+        `;
+      });
+      let lateProviderQueries = 0;
+      const lateSuccessReconciler = new UnknownOutcomeReconciler(
+        sql,
+        randomUUID,
+        60_000,
+        async () => {
+          lateProviderQueries += 1;
+          return true;
+        },
+      );
+      assert.equal(await lateSuccessReconciler.reconcileOnce(new Date(unknownReleaseNow.getTime() + 48 * 60 * 60 * 1000)), 0);
+      assert.equal(lateProviderQueries, 0);
+      const lateSuccessAfter = await sql.begin(async (transaction) => {
+        await transaction`select set_config('app.service_role', 'on', true)`;
+        return transaction<{
+          available: string;
+          reserved: string;
+          risk_entries: number;
+          timeout_releases: number;
+          settlements: number;
+        }[]>`
+          select
+            wallet.available::text,
+            wallet.reserved::text,
+            (select count(*)::int from platform_risk_entries where attempt_id = ${unknown.attempt_id}) as risk_entries,
+            (select count(*)::int from wallet_entries where reference_type = 'attempt' and reference_id = ${unknown.attempt_id} and kind = 'release_after_unknown_timeout') as timeout_releases,
+            (select count(*)::int from wallet_entries where reference_type = 'attempt' and reference_id = ${unknown.attempt_id} and kind = 'settle') as settlements
+          from wallet_accounts wallet where wallet.workspace_id = ${workspaceId}
+        `;
+      });
+      assert.deepEqual(lateSuccessAfter, lateSuccessBefore);
 
       const materializing = await sql.begin(async (transaction) => {
         await transaction`select set_config('app.service_role', 'on', true)`;

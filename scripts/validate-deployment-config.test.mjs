@@ -74,6 +74,14 @@ test("release manifest binds three multi-architecture images to the source commi
   assert.equal(result.status, 0, result.stderr);
 });
 
+test("release manifest rejects mutable workflow attempt metadata", async () => {
+  const manifest = releaseManifest();
+  manifest.source.runAttempt = 2;
+  const result = await validate(manifest);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /source must contain exactly/);
+});
+
 test("release manifest rejects a missing target platform", async () => {
   const manifest = releaseManifest();
   manifest.images.worker.platforms.pop();

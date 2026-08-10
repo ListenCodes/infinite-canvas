@@ -5,10 +5,13 @@ import { CLOUD_BACKEND_CONFIGURED } from "@/constant/runtime-config";
 import { CloudApiError } from "@/services/api/cloud-client";
 import { getCloudAssetUrl } from "@/services/api/cloud-assets";
 import { createCloudProject, listCloudProjects, updateCloudProject } from "@/services/api/cloud-projects";
+import { loadCloudMigrationRecord } from "@/services/cloud-migration";
+import { cloudMigrationActivationMatches, isCloudImportPublishedFor } from "@/services/cloud-migration-policy";
 import { uploadImage } from "@/services/image-storage";
 import { uploadMediaFile } from "@/services/file-storage";
 import { useCanvasStore, type CanvasProject } from "@/stores/canvas/use-canvas-store";
 import { useUserStore } from "@/stores/use-user-store";
+import { stageAndApplyCloudProjects } from "../cloud-project-bootstrap-core";
 
 function withoutEphemeralUrls<T>(value: T): T {
     if (Array.isArray(value)) return value.map(withoutEphemeralUrls) as T;
@@ -92,26 +95,70 @@ async function fromProjection(remote: ProjectProjection): Promise<CanvasProject 
 export function useCloudProjectsBootstrap(): void {
     const authenticated = useUserStore((state) => state.authenticated);
     const userId = useUserStore((state) => state.user?.id);
+    const workspaceId = useUserStore((state) => state.workspaceId);
     const projectsEnabled = useUserStore((state) => state.featureFlags.projects);
     const hydrated = useCanvasStore((state) => state.hydrated);
     useEffect(() => {
-        if (!CLOUD_BACKEND_CONFIGURED || !authenticated || !projectsEnabled || !userId || !hydrated) return;
+        if (!CLOUD_BACKEND_CONFIGURED || !authenticated || !projectsEnabled || !userId || !workspaceId || !hydrated) return;
         let disposed = false;
-        const load = async () => {
-            const projects = await listCloudProjects();
-            if (disposed) return;
-            const store = useCanvasStore.getState();
-            for (const remote of projects) {
-                const project = await fromProjection(remote);
-                if (disposed) return;
-                if (project) store.upsertCloudProject({ ...project, cloud: { ...project.cloud!, userId } });
+        const identity = { userId, workspaceId };
+        const load = async (requestedExportId?: string, approvedProjectRevisions?: Readonly<Record<string, string>>) => {
+            const migration = await loadCloudMigrationRecord(identity);
+            if (
+                requestedExportId !== undefined &&
+                (!migration || migration.status !== "published" || !cloudMigrationActivationMatches(migration, { ...identity, clientExportId: requestedExportId }))
+            ) {
+                throw new Error("Cloud migration activation no longer matches the published import");
             }
+            const mayReplaceImportedLocal = Boolean(
+                migration?.status === "published" &&
+                (requestedExportId === undefined
+                    ? migration.activatedAt
+                    : cloudMigrationActivationMatches(migration, { ...identity, clientExportId: requestedExportId })),
+            );
+            const projects = await listCloudProjects();
+            if (disposed) {
+                if (requestedExportId !== undefined) throw new Error("Cloud migration activation was interrupted");
+                return;
+            }
+            const store = useCanvasStore.getState();
+            if (requestedExportId !== undefined && !approvedProjectRevisions) throw new Error("Cloud migration activation approval is missing");
+            await stageAndApplyCloudProjects({
+                remotes: projects,
+                userId,
+                workspaceId,
+                mayReplaceUnbound: mayReplaceImportedLocal,
+                ...(requestedExportId !== undefined ? { expectedLocalProjectIds: Object.keys(migration?.projectRevisions ?? {}) } : {}),
+                ...(approvedProjectRevisions ? { approvedProjectRevisions } : {}),
+                currentProjectRevisions: () => useCanvasStore.getState().projects,
+                findLocal: (localProjectId) => store.openProject(localProjectId) ?? undefined,
+                materialize: async (remote) => {
+                    const project = await fromProjection(remote);
+                    if (disposed) {
+                        if (requestedExportId !== undefined) throw new Error("Cloud migration activation was interrupted");
+                        return null;
+                    }
+                    if (!project) return null;
+                    return { ...project, cloud: { ...project.cloud!, userId } };
+                },
+                apply: (staged) => {
+                    if (disposed) {
+                        if (requestedExportId !== undefined) throw new Error("Cloud migration activation was interrupted");
+                        return;
+                    }
+                    staged.forEach((project) => store.upsertCloudProject(project));
+                },
+            });
         };
         void load().catch(() => undefined);
-        const reload = () => void load().catch(() => undefined);
+        const reload = (event: Event) => {
+            if (!(event instanceof CustomEvent) || !isCloudImportPublishedFor(event.detail, identity)) return;
+            const detail = event.detail as { clientExportId: string; approvedProjectRevisions?: Readonly<Record<string, string>>; complete?: (error?: unknown) => void };
+            void load(detail.clientExportId, detail.approvedProjectRevisions).then(() => detail.complete?.()).catch((error) => detail.complete?.(error));
+        };
         window.addEventListener("infinite-canvas:cloud-import-published", reload);
         return () => { disposed = true; window.removeEventListener("infinite-canvas:cloud-import-published", reload); };
-    }, [authenticated, hydrated, projectsEnabled, userId]);
+    }, [authenticated, hydrated, projectsEnabled, userId, workspaceId]);
 }
 
 export function useCloudProjectSync(localProjectId: string) {

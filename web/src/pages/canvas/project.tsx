@@ -40,7 +40,7 @@ import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/a
 import { CanvasSidePanel } from "@/components/canvas/canvas-side-panel";
 import { CanvasZoomControls } from "@/components/canvas/canvas-zoom-controls";
 import { useAgentStore } from "@/stores/use-agent-store";
-import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
+import { flushCanvasPersistence, useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { useAgentBridge } from "@/pages/canvas/hooks/use-agent-bridge";
 import { usePluginHost } from "@/pages/canvas/hooks/use-plugin-host";
 import { buildNodeMentionReferences, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
@@ -90,7 +90,8 @@ import {
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio } from "@/types/media";
 import { useCloudProjectSync } from "@/pages/canvas/hooks/use-cloud-project-sync";
-import { resumeCloudImageBatches, runCloudImageGeneration, watchCloudImageBatch } from "@/pages/canvas/cloud-image-generation";
+import { rematerializeCloudImageJob, resumeCloudImageBatches, runCloudImageGeneration, watchCloudImageBatch } from "@/pages/canvas/cloud-image-generation";
+import { cloudImageRetryMode } from "@/pages/canvas/cloud-generation-recovery-drivers";
 import { resumeCloudVideoBatches, runCloudVideoGeneration, watchCloudVideoBatch } from "@/pages/canvas/cloud-video-generation";
 import { resumeCloudProjectGenerations } from "@/pages/canvas/cloud-generation-resume";
 import { cancelCloudGenerationJob, getCloudProjectActiveJobs, retryCloudGenerationJob } from "@/services/api/cloud-generation";
@@ -2567,6 +2568,17 @@ function InfiniteCanvasPage() {
         generateNodeRef.current = handleGenerateNode;
     }, [handleGenerateNode]);
 
+    const persistRetryNodes = useCallback(
+        async (updater: (current: CanvasNodeData[]) => CanvasNodeData[]) => {
+            const next = updater(nodesRef.current);
+            nodesRef.current = next;
+            setNodes(next);
+            updateProject(projectId, { nodes: next });
+            await flushCanvasPersistence();
+        },
+        [projectId, updateProject],
+    );
+
     const handleRetryNode = useCallback(
         async (node: CanvasNodeData, imageId?: string) => {
             const cloudImage = imageId ? node.metadata?.images?.find((image) => image.id === imageId && image.cloud?.jobId) : undefined;
@@ -2575,27 +2587,53 @@ function InfiniteCanvasPage() {
                     message.warning(t("cloud.featureDisabled"));
                     return;
                 }
-                if (!["failed", "canceled"].includes(cloudImage.cloud.serverStatus)) return;
+                const retryMode = cloudImageRetryMode(cloudImage);
+                if (!retryMode) return;
                 const controller = startGenerationRequest(node.id, node.id, node.id);
-                const idempotencyKey = cloudImage.cloud.retryIdempotencyKey || `retry:${crypto.randomUUID()}`;
                 setRunningNodeId(node.id);
-                setNodes((prev) =>
-                    prev.map((item) =>
-                        item.id === node.id
-                            ? {
-                                  ...item,
-                                  metadata: {
-                                      ...item.metadata,
-                                      status: NODE_STATUS_LOADING,
-                                      images: item.metadata?.images?.map((image) => (image.id === imageId ? { ...image, status: NODE_STATUS_LOADING, errorDetails: undefined, cloud: { ...image.cloud!, retryIdempotencyKey: idempotencyKey } } : image)),
-                                  },
-                              }
-                            : item,
-                    ),
-                );
-                try {
-                    const retried = await retryCloudGenerationJob(cloudImage.cloud.jobId, idempotencyKey);
+                if (retryMode === "materialize") {
                     setNodes((prev) =>
+                        prev.map((item) =>
+                            item.id === node.id
+                                ? {
+                                      ...item,
+                                      metadata: {
+                                          ...item.metadata,
+                                          status: NODE_STATUS_LOADING,
+                                          images: item.metadata?.images?.map((image) => (image.id === imageId ? { ...image, status: NODE_STATUS_LOADING, errorDetails: undefined } : image)),
+                                      },
+                                  }
+                                : item,
+                        ),
+                    );
+                    try {
+                        await rematerializeCloudImageJob(cloudImage.cloud.batchId, cloudImage.cloud.jobId, node.id, setNodes, controller.signal);
+                    } catch (error) {
+                        if (!isGenerationCanceled(error)) message.error(error instanceof Error ? error.message : t("canvas.projectPage.generationFailed"));
+                    } finally {
+                        finishGenerationRequest(node.id, controller);
+                        setRunningNodeId((current) => (current === node.id ? null : current));
+                    }
+                    return;
+                }
+                const idempotencyKey = cloudImage.cloud.retryIdempotencyKey || `retry:${crypto.randomUUID()}`;
+                try {
+                    await persistRetryNodes((prev) =>
+                        prev.map((item) =>
+                            item.id === node.id
+                                ? {
+                                      ...item,
+                                      metadata: {
+                                          ...item.metadata,
+                                          status: NODE_STATUS_LOADING,
+                                          images: item.metadata?.images?.map((image) => (image.id === imageId ? { ...image, status: NODE_STATUS_LOADING, errorDetails: undefined, cloud: { ...image.cloud!, retryIdempotencyKey: idempotencyKey } } : image)),
+                                      },
+                                  }
+                                : item,
+                        ),
+                    );
+                    const retried = await retryCloudGenerationJob(cloudImage.cloud.jobId, idempotencyKey);
+                    await persistRetryNodes((prev) =>
                         prev.map((item) =>
                             item.id === node.id
                                 ? {
@@ -2638,12 +2676,12 @@ function InfiniteCanvasPage() {
                 const controller = startGenerationRequest(node.id, node.id, node.id);
                 const idempotencyKey = node.metadata.cloudJob.retryIdempotencyKey || `retry:${crypto.randomUUID()}`;
                 setRunningNodeId(node.id);
-                setNodes((prev) =>
-                    prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_LOADING, errorDetails: undefined, cloudJob: { ...item.metadata!.cloudJob!, retryIdempotencyKey: idempotencyKey } } } : item)),
-                );
                 try {
+                    await persistRetryNodes((prev) =>
+                        prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_LOADING, errorDetails: undefined, cloudJob: { ...item.metadata!.cloudJob!, retryIdempotencyKey: idempotencyKey } } } : item)),
+                    );
                     const retried = await retryCloudGenerationJob(node.metadata.cloudJob.jobId, idempotencyKey);
-                    setNodes((prev) =>
+                    await persistRetryNodes((prev) =>
                         prev.map((item) =>
                             item.id === node.id
                                 ? {
@@ -2867,7 +2905,7 @@ function InfiniteCanvasPage() {
                 }
             }
         },
-        [cloudSync.canRunImage, cloudSync.canRunVideo, effectiveConfig, finishGenerationRequest, isAiConfigReady, message, openConfigDialog, startGenerationRequest, t],
+        [cloudSync.canRunImage, cloudSync.canRunVideo, effectiveConfig, finishGenerationRequest, isAiConfigReady, message, openConfigDialog, persistRetryNodes, startGenerationRequest, t],
     );
 
     const deleteBatchImage = useCallback((nodeId: string, imageId: string) => {

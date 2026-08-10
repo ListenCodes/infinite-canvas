@@ -104,6 +104,10 @@ export function parseLocalDataArchive(buffer: Uint8Array, maxUncompressedBytes: 
 
   const projects = z.array(importedProjectSchema).parse(jsonFile(files, "data/projects.json"));
   const assets = z.array(importedAssetSchema).parse(jsonFile(files, "data/assets.json"));
+  if (declared.has("data/local-assets.json")) {
+    const localAssets = z.array(z.record(z.string(), z.unknown())).parse(jsonFile(files, "data/local-assets.json"));
+    assertNoSecrets(localAssets, "localAssets");
+  }
   assertNoSecrets(projects, "projects");
   assertNoSecrets(assets, "assets");
   if (projects.length !== manifest.counts.projects || assets.length !== manifest.counts.assets) throw new Error("Manifest record counts do not match data files");

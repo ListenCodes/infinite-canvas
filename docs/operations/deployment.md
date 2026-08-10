@@ -80,6 +80,8 @@ owner or `BYPASSRLS` roles. Never fall back from
 7. Record revision, the validated `release-images.json` (including three image and
    per-platform digests), migration checksums, Hatchet workflow
    versions, smoke results, and rollback references in the release evidence file.
+   The canonical manifest records the stable workflow run ID but excludes the
+   mutable run-attempt number so an unchanged release can be rerun byte-for-byte.
 
 For OSS, Compose waits for `hatchet-engine:/ready` and
 `hatchet-dashboard:/api/ready` before starting the Worker. The dashboard embeds

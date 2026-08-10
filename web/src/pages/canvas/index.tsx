@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { App, Button, Tag } from "antd";
-import { CloudUpload, Download, FileUp, Plus } from "lucide-react";
+import { CloudDownload, CloudUpload, Download, FileUp, Plus } from "lucide-react";
 import { saveAs } from "file-saver";
 import { useTranslation } from "react-i18next";
 
@@ -12,12 +12,15 @@ import { CanvasDeleteProjectsDialog } from "@/components/canvas/canvas-delete-pr
 import { CanvasProjectCard } from "@/components/canvas/canvas-project-card";
 import type { CanvasExportFile } from "@/types/canvas-export";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
+import { useAssetStore, type Asset } from "@/stores/use-asset-store";
 import { useCanvasUiStore } from "@/stores/canvas/use-canvas-ui-store";
 import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
+import { isDurableMigrationStorageKey } from "@/lib/canvas/cloud-migration-export-core";
+import { parseCloudMigrationRollbackData, restoreCloudMigrationLocalAssets } from "@/lib/canvas/cloud-migration-restore-core";
 import { useCloudMigration } from "@/hooks/use-cloud-migration";
 
 export default function CanvasPage() {
-    const { message } = App.useApp();
+    const { message, modal } = App.useApp();
     const { t } = useTranslation();
     const navigate = useNavigate();
     const [searchParams] = useSearchParams();
@@ -46,25 +49,101 @@ export default function CanvasPage() {
             message.error(error instanceof Error ? error.message : t("cloud.migrationFailed"));
         }
     };
+    const activateCloudMigration = () => {
+        modal.confirm({
+            title: t("cloud.activateMigration"),
+            content: cloudMigration.localChangesSinceExport
+                ? t("cloud.activateMigrationChangedConfirm")
+                : t("cloud.activateMigrationConfirm"),
+            okText: t("cloud.activateMigration"),
+            onOk: () => cloudMigration.activate(),
+        });
+    };
+    const verifyDigest = async (blob: Blob, expected: string) => {
+        const digest = await crypto.subtle.digest("SHA-256", await blob.arrayBuffer());
+        const actual = Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, "0")).join("");
+        if (actual !== expected) throw new Error("migration object checksum mismatch");
+    };
     const importCanvas = async (file?: File) => {
         if (!file) return;
         try {
             const zip = await readZip(file);
             const projectFile = zip.get("projects.json");
-            if (!projectFile) throw new Error("missing projects.json");
-            const data = JSON.parse(await projectFile.text()) as CanvasExportFile;
-            await Promise.all(
-                data.projects.flatMap((project) =>
-                    project.files.map(async (item) => {
-                        const blob = zip.get(item.path);
-                        if (!blob) return;
-                        const typedBlob = blob.type ? blob : blob.slice(0, blob.size, item.mimeType);
-                        await (item.storageKey.startsWith("image:") ? setImageBlob(item.storageKey, typedBlob) : setMediaBlob(item.storageKey, typedBlob));
-                    }),
-                ),
+            if (projectFile) {
+                const data = JSON.parse(await projectFile.text()) as CanvasExportFile;
+                await Promise.all(
+                    data.projects.flatMap((project) =>
+                        project.files.map(async (item) => {
+                            const blob = zip.get(item.path);
+                            if (!blob) return;
+                            const typedBlob = blob.type ? blob : blob.slice(0, blob.size, item.mimeType);
+                            await (item.storageKey.startsWith("image:") ? setImageBlob(item.storageKey, typedBlob) : setMediaBlob(item.storageKey, typedBlob));
+                        }),
+                    ),
+                );
+                data.projects.forEach((item) => importProject(item.project));
+                message.success(t("canvas.imported", { count: data.projects.length }));
+                return;
+            }
+            const manifestFile = zip.get("manifest.json");
+            const migrationProjectsFile = zip.get("data/projects.json");
+            const migrationAssetsFile = zip.get("data/assets.json");
+            const migrationLocalAssetsFile = zip.get("data/local-assets.json");
+            if (!manifestFile || !migrationProjectsFile || !migrationAssetsFile) throw new Error("missing projects.json");
+            const manifestValue = JSON.parse(await manifestFile.text()) as Record<string, unknown>;
+            if (!Array.isArray(manifestValue.files)) throw new Error("migration manifest files are invalid");
+            const declaredFiles = new Map(
+                manifestValue.files.map((value) => {
+                    if (!value || typeof value !== "object") throw new Error("migration manifest file is invalid");
+                    const file = value as Record<string, unknown>;
+                    if (
+                        typeof file.path !== "string" ||
+                        typeof file.bytes !== "string" || !/^\d+$/.test(file.bytes) ||
+                        typeof file.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(file.sha256)
+                    ) throw new Error("migration manifest file is invalid");
+                    return [file.path, { bytes: Number(file.bytes), sha256: file.sha256 }] as const;
+                }),
             );
-            data.projects.forEach((item) => importProject(item.project));
-            message.success(t("canvas.imported", { count: data.projects.length }));
+            const verifyDeclaredFile = async (path: string, blob?: Blob, optional = false) => {
+                const declared = declaredFiles.get(path);
+                if (!declared) {
+                    if (optional && !blob) return false;
+                    throw new Error(`migration manifest is missing ${path}`);
+                }
+                if (!blob || !Number.isSafeInteger(declared.bytes) || declared.bytes < 0 || blob.size !== declared.bytes) {
+                    throw new Error(`migration file is missing or truncated: ${path}`);
+                }
+                await verifyDigest(blob, declared.sha256);
+                return true;
+            };
+            await verifyDeclaredFile("data/projects.json", migrationProjectsFile);
+            await verifyDeclaredFile("data/assets.json", migrationAssetsFile);
+            const hasLocalAssets = await verifyDeclaredFile("data/local-assets.json", migrationLocalAssetsFile, true);
+            const rollback = parseCloudMigrationRollbackData(
+                manifestValue,
+                JSON.parse(await migrationProjectsFile.text()),
+                JSON.parse(await migrationAssetsFile.text()),
+                hasLocalAssets && migrationLocalAssetsFile ? JSON.parse(await migrationLocalAssetsFile.text()) : [],
+            );
+            const restoredUrls = new Map<string, string>();
+            await Promise.all(
+                rollback.assets.map(async (asset) => {
+                    if (!isDurableMigrationStorageKey(asset.sourceId)) return;
+                    const object = zip.get(`objects/${asset.sha256}`);
+                    if (!object || object.size !== asset.bytes) throw new Error("migration object is missing or truncated");
+                    await verifyDigest(object, asset.sha256);
+                    const typedBlob = object.slice(0, object.size, asset.mime);
+                    const url = await (asset.sourceId.startsWith("image:") ? setImageBlob(asset.sourceId, typedBlob) : setMediaBlob(asset.sourceId, typedBlob));
+                    restoredUrls.set(asset.sourceId, url);
+                }),
+            );
+            if (rollback.localAssets.length) {
+                useAssetStore.getState().replaceAssets(
+                    restoreCloudMigrationLocalAssets(rollback.localAssets, restoredUrls, useAssetStore.getState().assets) as Asset[],
+                );
+            }
+            rollback.projects.forEach((project) => importProject({ ...project.document, title: project.title }));
+            message.success(t("canvas.imported", { count: rollback.projects.length }));
         } catch {
             message.error(t("canvas.importFailed"));
         } finally {
@@ -90,11 +169,24 @@ export default function CanvasPage() {
                     </div>
                     <div className="flex items-center gap-2">
                         {cloudMigration.record ? <Tag>{t(`cloud.migrationStatuses.${cloudMigration.record.status}`)}</Tag> : null}
-                        {cloudMigration.record ? (
-                            <Button icon={<Download className="size-4" />} onClick={() => saveAs(cloudMigration.record!.archive, `infinite-canvas-${cloudMigration.record!.clientExportId}.zip`)} title={t("cloud.downloadMigrationArchive")} aria-label={t("cloud.downloadMigrationArchive")} />
+                        {cloudMigration.record || cloudMigration.legacyRecord ? (
+                            <Button
+                                icon={<Download className="size-4" />}
+                                onClick={() => {
+                                    const archive = cloudMigration.record ?? cloudMigration.legacyRecord!;
+                                    saveAs(archive.archive, `infinite-canvas-${cloudMigration.record ? "migration" : "legacy-migration"}-${archive.clientExportId}.zip`);
+                                }}
+                                title={t("cloud.downloadMigrationArchive")}
+                                aria-label={t("cloud.downloadMigrationArchive")}
+                            />
                         ) : null}
-                        {cloudMigration.available ? (
-                            <Button disabled={!projects.length || cloudMigration.busy || (["uploaded", "validating", "importing"].includes(cloudMigration.record?.status ?? ""))} loading={cloudMigration.busy} icon={<CloudUpload className="size-4" />} onClick={() => void migrateToCloud()}>
+                        {cloudMigration.record?.status === "published" && !cloudMigration.record.activatedAt ? (
+                            <Button disabled={cloudMigration.busy} icon={<CloudDownload className="size-4" />} onClick={activateCloudMigration}>
+                                {t("cloud.activateMigration")}
+                            </Button>
+                        ) : null}
+                        {cloudMigration.available && (!cloudMigration.record || cloudMigration.record.status === "failed") ? (
+                            <Button disabled={!projects.length || cloudMigration.busy} loading={cloudMigration.busy} icon={<CloudUpload className="size-4" />} onClick={() => void migrateToCloud()}>
                                 {cloudMigration.record?.status === "failed" ? t("cloud.retryMigration") : t("cloud.migrate")}
                             </Button>
                         ) : null}

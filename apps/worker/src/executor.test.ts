@@ -307,7 +307,7 @@ test("completed response materializes before immutable settlement", async () => 
   ]);
 });
 
-test("materialization crash resumes from stored media evidence without repeating paid submit", async () => {
+test("object write survives a crash before materialized evidence without repeating paid submit", async () => {
   const calls: string[] = [];
   const current = execution({
     type: "fake",
@@ -371,36 +371,46 @@ test("materialization crash resumes from stored media evidence without repeating
     },
     async convergeFailure() {},
   };
-  let materializeCalls = 0;
+  let persistedAsset:
+    | {
+        objectKey: string;
+        mime: string;
+        bytes: bigint;
+        sha256: string;
+        kind: "image";
+      }
+    | undefined;
+  let recoverCalls = 0;
   const storage = {
     async materialize() {
       calls.push("storage");
-      materializeCalls += 1;
-      if (materializeCalls === 1)
-        throw new Error("worker terminated after provider success");
-      return {
+      persistedAsset = {
         objectKey: "key",
         mime: "image/png",
         bytes: 10n,
         sha256: "hash",
         kind: "image" as const,
       };
+      throw new Error("worker terminated after object write");
     },
     async recoverMaterialized() {
-      return undefined;
+      recoverCalls += 1;
+      return persistedAsset;
     },
   };
   const executor = new GenerationExecutor(repository, storage);
   await assert.rejects(
     executor.execute(workflowInput, context()),
-    /worker terminated/,
+    /worker terminated after object write/,
   );
   assert.equal(
     (await executor.execute(workflowInput, context())).outcome,
     "succeeded",
   );
   assert.equal(calls.filter((call) => call === "submit").length, 1);
-  assert.equal(calls.filter((call) => call === "storage").length, 2);
+  assert.equal(calls.filter((call) => call === "storage").length, 1);
+  assert.equal(recoverCalls, 1);
+  assert.equal(calls.filter((call) => call === "materialized").length, 1);
   assert.equal(calls.filter((call) => call === "complete").length, 1);
 });
 

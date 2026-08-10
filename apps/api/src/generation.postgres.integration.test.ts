@@ -132,9 +132,11 @@ test("ten concurrent idempotent creates and failed-slot retries preserve exact c
       await transaction`select app.settle_reservation(${succeeded.attemptId}, ${randomUUID()})`;
       await transaction`update generation_attempts set status = 'succeeded', completed_at = now() where id = ${succeeded.attemptId}`;
       await transaction`update generation_jobs set status = 'succeeded', output_asset_id = ${assetId}, terminal_at = now(), version = version + 1 where id = ${succeeded.jobId}`;
-      for (const job of failed) {
-        await transaction`select app.release_reservation(${job.attemptId}, ${randomUUID()}, 'integration_failed')`;
-        await transaction`update generation_attempts set status = 'failed', completed_at = now(), error_code = 'integration_failed' where id = ${job.attemptId}`;
+      for (const [index, job] of failed.entries()) {
+        const errorCode = index === 0 ? "provider_rate_limited" : "content_moderation_rejected";
+        const errorMessage = index === 0 ? "Provider capacity was exhausted" : "Prompt was rejected by moderation";
+        await transaction`select app.release_reservation(${job.attemptId}, ${randomUUID()}, ${errorCode})`;
+        await transaction`update generation_attempts set status = 'failed', completed_at = now(), error_code = ${errorCode}, error_message = ${errorMessage} where id = ${job.attemptId}`;
         await transaction`update generation_jobs set status = 'failed', terminal_at = now(), version = version + 1 where id = ${job.jobId}`;
       }
       await transaction`select app.refresh_generation_batch(${batchId})`;
@@ -142,6 +144,10 @@ test("ten concurrent idempotent creates and failed-slot retries preserve exact c
 
     const beforeRetry = await service.getBatch(userId, batchId);
     assert.equal(beforeRetry.status, "partial_succeeded");
+    assert.deepEqual(
+      failed.map((job) => beforeRetry.jobs.find((candidate) => candidate.slotId === job.slotId)?.errorCode),
+      ["provider_rate_limited", "content_moderation_rejected"],
+    );
     await Promise.all(failed.map((job, index) => service.retryJob(userId, job.jobId, `failed-slot-retry-key-000${index}`)));
     await Promise.all(failed.map((job, index) => service.retryJob(userId, job.jobId, `failed-slot-retry-key-000${index}`)));
     const afterRetry = await service.getBatch(userId, batchId);

@@ -5,13 +5,15 @@ import { getMediaBlob } from "@/services/file-storage";
 import { getImageBlob } from "@/services/image-storage";
 import type { Asset } from "@/stores/use-asset-store";
 import type { CanvasProject } from "@/stores/canvas/use-canvas-store";
+import {
+    annotateMigrationDocument,
+    assertDurableMigrationAssets,
+    assertMigrationSourcesPresent,
+    collectMigrationStorageKeys,
+    type MigrationSourceObject,
+} from "./cloud-migration-export-core";
 
 type MediaKind = "image" | "video" | "audio";
-
-interface SourceObject {
-    blob: Blob;
-    filename: string;
-}
 
 interface ExportedAsset {
     sourceId: string;
@@ -44,42 +46,6 @@ async function sha256(value: Blob | Uint8Array): Promise<string> {
     return Array.from(new Uint8Array(digest), (item) => item.toString(16).padStart(2, "0")).join("");
 }
 
-function collectStorageKeys(value: unknown, keys = new Set<string>()): Set<string> {
-    if (!value || typeof value !== "object") return keys;
-    const record = value as Record<string, unknown>;
-    if (typeof record.storageKey === "string" && record.storageKey.includes(":")) keys.add(record.storageKey);
-    for (const item of Object.values(record)) {
-        if (Array.isArray(item)) item.forEach((child) => collectStorageKeys(child, keys));
-        else collectStorageKeys(item, keys);
-    }
-    return keys;
-}
-
-function annotateDocument(value: unknown, sources: ReadonlyMap<string, SourceObject>): unknown {
-    if (Array.isArray(value)) return value.map((item) => annotateDocument(item, sources));
-    if (!value || typeof value !== "object") return value;
-    const record = value as Record<string, unknown>;
-    const sanitized = Object.fromEntries(
-        Object.entries(record).map(([key, item]) => {
-            if (
-                ["content", "url", "dataUrl", "coverUrl"].includes(key) &&
-                typeof item === "string" &&
-                (item.startsWith("blob:") || item.startsWith("data:"))
-            )
-                return [key, ""];
-            return [key, annotateDocument(item, sources)];
-        }),
-    );
-    const storageKey = record.storageKey;
-    const source = typeof storageKey === "string" ? sources.get(storageKey) : undefined;
-    if (!source) return sanitized;
-    return {
-        ...sanitized,
-        cloudAssetId: storageKey,
-        cloudAssetMime: source.blob.type,
-    };
-}
-
 async function sourceObject(storageKey: string): Promise<Blob | null> {
     return storageKey.startsWith("image:")
         ? getImageBlob(storageKey)
@@ -91,9 +57,10 @@ export async function createCloudMigrationArchive(
     assets: readonly Asset[],
     clientExportId: string,
 ): Promise<CloudMigrationArchive> {
-    const sources = new Map<string, SourceObject>();
+    assertDurableMigrationAssets(assets);
+    const sources = new Map<string, MigrationSourceObject>();
     const storageKeys = new Set<string>();
-    projects.forEach((project) => collectStorageKeys(project, storageKeys));
+    projects.forEach((project) => collectMigrationStorageKeys(project, storageKeys));
     for (const asset of assets) {
         if (asset.kind === "text") continue;
         if (asset.data.storageKey) storageKeys.add(asset.data.storageKey);
@@ -104,6 +71,7 @@ export async function createCloudMigrationArchive(
             if (blob) sources.set(storageKey, { blob, filename: storageKey });
         }),
     );
+    assertMigrationSourcesPresent(storageKeys, sources);
     for (const asset of assets) {
         if (asset.kind === "text" || !asset.data.storageKey) continue;
         const source = sources.get(asset.data.storageKey);
@@ -132,16 +100,31 @@ export async function createCloudMigrationArchive(
         const documentJson: CanvasDocument = {
             schemaVersion: 1,
             localProjectId: project.id,
-            document: annotateDocument(localDocument, sources) as Record<string, unknown>,
+            document: annotateMigrationDocument(localDocument, sources) as Record<string, unknown>,
         };
         return { sourceId: project.id, title: project.title, documentJson };
     });
     const encoder = new TextEncoder();
     const projectBytes = encoder.encode(JSON.stringify(exportedProjects));
     const assetBytes = encoder.encode(JSON.stringify(exportedAssets));
+    const localAssetBytes = encoder.encode(JSON.stringify(assets.map((asset) => {
+        if (asset.kind === "text") return asset;
+        const source = sources.get(asset.data.storageKey!);
+        if (!source) throw new Error("Cloud migration cannot continue because a local asset object is missing");
+        const localUrl = asset.kind === "image" ? asset.data.dataUrl : asset.data.url;
+        return {
+            ...asset,
+            coverUrl: asset.coverUrl.startsWith("blob:") || asset.coverUrl.startsWith("data:") ? "" : asset.coverUrl,
+            data: {
+                ...asset.data,
+                ...(asset.kind === "image" ? { dataUrl: localUrl.startsWith("blob:") || localUrl.startsWith("data:") ? "" : localUrl } : { url: localUrl.startsWith("blob:") || localUrl.startsWith("data:") ? "" : localUrl }),
+            },
+        };
+    })));
     const files: { path: string; bytes: string; sha256: string; mediaType: string }[] = [
         { path: "data/projects.json", bytes: String(projectBytes.byteLength), sha256: await sha256(projectBytes), mediaType: "application/json" },
         { path: "data/assets.json", bytes: String(assetBytes.byteLength), sha256: await sha256(assetBytes), mediaType: "application/json" },
+        { path: "data/local-assets.json", bytes: String(localAssetBytes.byteLength), sha256: await sha256(localAssetBytes), mediaType: "application/json" },
     ];
     for (const [digest, blob] of objects) {
         files.push({ path: `objects/${digest}`, bytes: String(blob.size), sha256: digest, mediaType: blob.type });
@@ -159,6 +142,7 @@ export async function createCloudMigrationArchive(
         { name: "manifest.json", data: JSON.stringify(manifest) },
         { name: "data/projects.json", data: projectBytes },
         { name: "data/assets.json", data: assetBytes },
+        { name: "data/local-assets.json", data: localAssetBytes },
         ...Array.from(objects, ([digest, blob]) => ({ name: `objects/${digest}`, data: blob })),
     ]);
     return { archive, counts };
