@@ -6,6 +6,7 @@ import { extname, resolve, sep } from "node:path";
 import { chromium } from "playwright-core";
 
 import { buildServer } from "../apps/api/dist/server.js";
+import { findCanaryLocations, scanBrowserStorage } from "./browser-boundary-scan.mjs";
 
 const webRoot = resolve(process.argv[2] ?? "web/dist");
 const startupTimeoutMs = Number(process.env.BROWSER_STARTUP_TIMEOUT_MS ?? "30000");
@@ -23,6 +24,11 @@ const jobId = "00000000-0000-4000-8000-000000000701";
 const attemptId = "00000000-0000-4000-8000-000000000801";
 const email = "relogin-recovery@example.invalid";
 const password = "local-fixture-password";
+const platformCanaries = (process.env.SECRET_SCAN_CANARIES ?? "local-service-secret-canary-0001,local-hatchet-secret-canary-0002,local-credential-secret-canary-0003")
+  .split(",")
+  .map((value) => value.trim())
+  .filter(Boolean);
+if (platformCanaries.length !== 3) throw new Error("SECRET_SCAN_CANARIES must contain exactly three values");
 const timestamps = {
   createdAt: "2026-08-10T00:00:00.000Z",
   updatedAt: "2026-08-10T00:01:00.000Z",
@@ -119,6 +125,11 @@ const authServer = createServer(async (request, response) => {
     return;
   }
   const url = new URL(request.url ?? "/", "http://127.0.0.1");
+  if (request.method === "GET" && url.pathname === "/auth/v1/boundary-probe") {
+    response.writeHead(200, { ...cors, "content-type": "application/json", "cache-control": "no-store" });
+    response.end(JSON.stringify({ probe: platformCanaries[0] }));
+    return;
+  }
   if (request.method !== "POST" || url.pathname !== "/auth/v1/token" || url.searchParams.get("grant_type") !== "password") {
     response.writeHead(404, { ...cors, "content-type": "application/json" });
     response.end(JSON.stringify({ message: "Not found" }));
@@ -199,7 +210,8 @@ function taskProjection() {
   };
 }
 
-function unusedService() {
+function unusedService(boundaryValue = "") {
+  void boundaryValue;
   return new Proxy({}, { get: (_target, property) => async () => { throw new Error(`Unexpected fixture call: ${String(property)}`); } });
 }
 
@@ -214,12 +226,12 @@ try {
       HOST: "127.0.0.1",
       PORT: 0,
       LOG_LEVEL: "silent",
-      METRICS_BEARER_TOKEN: "local-metrics-token-32-characters-long",
+      METRICS_BEARER_TOKEN: platformCanaries[1],
       BUSINESS_DATABASE_URL: "postgres://local:local@127.0.0.1/local",
       BUSINESS_DATABASE_LISTENER_URL: "postgres://local:local@127.0.0.1/local",
       SUPABASE_URL: authOrigin,
       SUPABASE_JWT_AUDIENCE: "authenticated",
-      SUPABASE_SERVICE_ROLE_KEY: "local-service-role-placeholder",
+      SUPABASE_SERVICE_ROLE_KEY: platformCanaries[0],
       CREDENTIAL_MASTER_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
       STORAGE_BUCKET: "local",
       CORS_ALLOWED_ORIGINS: applicationOrigin,
@@ -292,7 +304,7 @@ try {
     eventService: unusedService(),
     eventBroker: { async start() {}, subscribe() { return () => {}; }, async close() {} },
     readinessProbe: async () => {},
-    adminService: unusedService(),
+    adminService: unusedService(platformCanaries[2]),
   });
   apiOrigin = await api.listen({ host: "127.0.0.1", port: 0 });
 
@@ -301,12 +313,40 @@ try {
   const blockedHttpRequests = [];
   const blockedWebSockets = [];
   const externalHttpResponses = [];
+  const networkBoundaryRecords = [];
+  const responseCapturePromises = [];
+  const inspectedOrigins = new Set([apiOrigin, authOrigin]);
   const createContext = async () => {
     const context = await browser.newContext({ serviceWorkers: "block" });
+    context.on("request", (request) => {
+      const url = new URL(request.url());
+      if (!inspectedOrigins.has(url.origin)) return;
+      networkBoundaryRecords.push({
+        kind: "request",
+        url: request.url(),
+        headers: request.headers(),
+        body: request.postData() ?? "",
+      });
+    });
     context.on("response", (response) => {
       const url = new URL(response.url());
       if (["http:", "https:"].includes(url.protocol) && !allowedOrigins.has(url.origin)) {
         externalHttpResponses.push(url.href);
+      }
+      if (inspectedOrigins.has(url.origin)) {
+        responseCapturePromises.push((async () => {
+          const contentType = response.headers()["content-type"] ?? "";
+          const body = /json|text|event-stream/i.test(contentType)
+            ? await response.text().catch(() => "")
+            : "";
+          networkBoundaryRecords.push({
+            kind: "response",
+            url: response.url(),
+            status: response.status(),
+            headers: response.headers(),
+            body: body.length <= 2 * 1024 * 1024 ? body : "response-too-large",
+          });
+        })());
       }
     });
     await context.route("**/*", async (route) => {
@@ -407,6 +447,23 @@ try {
   assert.ok(blockedHttpRequests.includes(isolationProbe.http), "HTTP isolation probe was not blocked");
   assert.deepEqual(externalHttpResponses, [], "a non-local HTTP request received a response");
   assert.ok(blockedWebSockets.includes(isolationProbe.websocket), "WebSocket isolation probe was not blocked");
+
+  await pageB.evaluate(async (origin) => {
+    const response = await fetch(`${origin}/auth/v1/boundary-probe`);
+    if (!response.ok) throw new Error("Network boundary positive probe failed");
+    await response.json();
+  }, authOrigin);
+  await Promise.all(responseCapturePromises);
+  const positiveNetworkRecords = networkBoundaryRecords.filter((record) => record.url.includes("/auth/v1/boundary-probe"));
+  assert.ok(findCanaryLocations(positiveNetworkRecords, platformCanaries).length > 0, "network scanner did not detect its positive probe");
+  const operationalNetworkRecords = networkBoundaryRecords.filter((record) => !record.url.includes("/auth/v1/boundary-probe"));
+  assert.deepEqual(findCanaryLocations(operationalNetworkRecords, platformCanaries), [], "platform canary leaked through authenticated browser traffic");
+
+  assert.deepEqual(await scanBrowserStorage(pageB, platformCanaries), [], "platform canary leaked into authenticated browser storage");
+  await pageB.evaluate((canary) => localStorage.setItem("__platform_boundary_positive_probe__", canary), platformCanaries[2]);
+  assert.ok((await scanBrowserStorage(pageB, platformCanaries)).length > 0, "storage scanner did not detect its positive probe");
+  await pageB.evaluate(() => localStorage.removeItem("__platform_boundary_positive_probe__"));
+  assert.deepEqual(await scanBrowserStorage(pageB, platformCanaries), [], "storage positive probe cleanup failed");
   await contextB.close();
   process.stdout.write("Browser close and relogin generation recovery passed\n");
 } finally {

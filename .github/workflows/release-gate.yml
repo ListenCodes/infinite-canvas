@@ -54,6 +54,8 @@ jobs:
           SECRET_SCAN_CANARIES: release-gate-service-secret-0001,release-gate-hatchet-secret-0002,release-gate-credential-secret-0003
         run: npm run verify:browser-storage-boundary
       - name: Verify browser close and relogin recovery
+        env:
+          SECRET_SCAN_CANARIES: release-gate-service-secret-0001,release-gate-hatchet-secret-0002,release-gate-credential-secret-0003
         run: npm run verify:browser-relogin-recovery
 
   postgres-integration:

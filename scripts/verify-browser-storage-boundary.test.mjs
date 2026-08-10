@@ -6,8 +6,19 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { findCanaryLocations } from "./browser-boundary-scan.mjs";
+
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const verifier = resolve(repository, "scripts/verify-browser-storage-boundary.mjs");
+
+test("browser boundary scanner inspects request and response fields recursively", () => {
+  const canary = "browser-boundary-canary-0001";
+  const records = [
+    { kind: "request", headers: { authorization: "Bearer public-token" }, body: "clean" },
+    { kind: "response", headers: { "x-probe": "clean" }, body: { nested: canary } },
+  ];
+  assert.deepEqual(findCanaryLocations(records, [canary]), ["record-1.body.nested"]);
+});
 
 test("browser storage verifier fails closed when the built application cannot start", async () => {
   const fixtures = [

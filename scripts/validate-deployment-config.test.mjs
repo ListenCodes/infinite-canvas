@@ -753,6 +753,17 @@ test("release gate runs browser close and relogin recovery after the production 
     steps[recoveryIndex].run,
     "npm run verify:browser-relogin-recovery",
   );
+  assert.equal(
+    steps[recoveryIndex].env?.SECRET_SCAN_CANARIES,
+    "release-gate-service-secret-0001,release-gate-hatchet-secret-0002,release-gate-credential-secret-0003",
+  );
+  const verifier = await readFile(
+    resolve(repository, "scripts/verify-browser-relogin-recovery.mjs"),
+    "utf8",
+  );
+  assert.match(verifier, /networkBoundaryRecords/);
+  assert.match(verifier, /scanBrowserStorage/);
+  assert.match(verifier, /boundary-probe/);
 });
 
 test("PostgreSQL fixture types dynamic role parameters before format", async () => {
