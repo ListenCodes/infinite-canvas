@@ -7,7 +7,7 @@ services:
       POSTGRES_DB: infinite_canvas
     ports:
       - target: 5432
-        published: "0"
+        published: "${RECOVERY_BUSINESS_DB_PORT:?required}"
         host_ip: 127.0.0.1
         protocol: tcp
     volumes: ["business-data:/var/lib/postgresql/data"]
@@ -26,7 +26,7 @@ services:
       POSTGRES_DB: hatchet
     ports:
       - target: 5432
-        published: "0"
+        published: "${RECOVERY_HATCHET_DB_PORT:?required}"
         host_ip: 127.0.0.1
         protocol: tcp
     volumes: ["hatchet-data:/var/lib/postgresql/data"]
@@ -44,7 +44,7 @@ services:
       MOTO_PORT: "5000"
     ports:
       - target: 5000
-        published: "0"
+        published: "${RECOVERY_MOTO_PORT:?required}"
         host_ip: 127.0.0.1
         protocol: tcp
     healthcheck:
@@ -70,11 +70,11 @@ services:
       SERVER_MSGQUEUE_KIND: postgres
     ports:
       - target: 8888
-        published: "0"
+        published: "${RECOVERY_HATCHET_API_PORT:?required}"
         host_ip: 127.0.0.1
         protocol: tcp
       - target: 8733
-        published: "0"
+        published: "${RECOVERY_HATCHET_HEALTH_PORT:?required}"
         host_ip: 127.0.0.1
         protocol: tcp
     volumes: ["hatchet-config:/config"]

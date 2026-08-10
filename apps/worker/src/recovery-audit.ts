@@ -116,7 +116,7 @@ async function main(): Promise<void> {
       "Recovery audit",
     );
     const snapshot = await database.client.begin(
-      "repeatable read read only",
+      "isolation level repeatable read read only",
       async (transaction) => {
         await transaction`select set_config('app.service_role', 'on', true)`;
         const migrations = await transaction<

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import { dirname, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -17,7 +18,7 @@ import {
   createTerminalRun,
 } from "./hatchet-terminal-probe.mjs";
 import { verifyRestoredTerminalRun } from "./hatchet-terminal-verify.mjs";
-import { terminateChildren } from "./run-local-drill.mjs";
+import { reserveLoopbackPorts, terminateChildren } from "./run-local-drill.mjs";
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -413,6 +414,28 @@ test("termination escalates a stuck child after the grace period", () => {
   assert.deepEqual(cleanupSignals, []);
 });
 
+test("recovery drill reserves distinct loopback ports until Docker startup", async () => {
+  const reservation = await reserveLoopbackPorts(4);
+  try {
+    assert.equal(new Set(reservation.ports).size, 4);
+    for (const port of reservation.ports) {
+      await assert.rejects(
+        new Promise((resolvePromise, reject) => {
+          const candidate = createServer();
+          candidate.once("error", reject);
+          candidate.listen({ host: "127.0.0.1", port, exclusive: true }, () => {
+            candidate.close();
+            resolvePromise();
+          });
+        }),
+        { code: "EADDRINUSE" },
+      );
+    }
+  } finally {
+    await reservation.release();
+  }
+});
+
 test("recovery topology isolates the Hatchet observer from application data and egress networks", async () => {
   const compose = await readFile(resolve(repository, "infra/compose/recovery/compose.yaml"), "utf8");
   const parsed = parse(compose);
@@ -425,13 +448,13 @@ test("recovery topology isolates the Hatchet observer from application data and 
   for (const required of ["business-db:", "hatchet-db:", "hatchet-lite:", "moto:", "recovery-audit:", "hatchet-terminal-observer:"]) {
     assert.ok(compose.includes(required), required);
   }
-  const dynamicLoopbackPort = (target) => ({ target, published: "0", host_ip: "127.0.0.1", protocol: "tcp" });
-  assert.deepEqual(parsed.services["business-db"].ports, [dynamicLoopbackPort(5432)]);
-  assert.deepEqual(parsed.services["hatchet-db"].ports, [dynamicLoopbackPort(5432)]);
-  assert.deepEqual(parsed.services.moto.ports, [dynamicLoopbackPort(5000)]);
+  const loopbackPort = (target, published) => ({ target, published, host_ip: "127.0.0.1", protocol: "tcp" });
+  assert.deepEqual(parsed.services["business-db"].ports, [loopbackPort(5432, "${RECOVERY_BUSINESS_DB_PORT:?required}")]);
+  assert.deepEqual(parsed.services["hatchet-db"].ports, [loopbackPort(5432, "${RECOVERY_HATCHET_DB_PORT:?required}")]);
+  assert.deepEqual(parsed.services.moto.ports, [loopbackPort(5000, "${RECOVERY_MOTO_PORT:?required}")]);
   assert.deepEqual(parsed.services["hatchet-lite"].ports, [
-    dynamicLoopbackPort(8888),
-    dynamicLoopbackPort(8733),
+    loopbackPort(8888, "${RECOVERY_HATCHET_API_PORT:?required}"),
+    loopbackPort(8733, "${RECOVERY_HATCHET_HEALTH_PORT:?required}"),
   ]);
   assert.match(compose, /HATCHET_CLIENT_TOKEN_FILE: \/run\/secrets\/hatchet-client-token/);
   assert.match(compose, /source: recovery-hatchet-client-token/);
@@ -466,7 +489,7 @@ test("drill emits only a redacted report and cleans exact temporary projects", a
   assert.match(script, /if \(probeTokenPath\) await writeContainerReadableSecret\(probeTokenPath, ""\)/);
   assert.match(script, /process\.on\(signal, handler\)/);
   assert.match(script, /publishedPort/);
-  assert.doesNotMatch(script, /freePort|createServer/);
+  assert.match(script, /reserveLoopbackPorts/);
   const probe = await readFile(resolve(repository, "scripts/recovery/hatchet-terminal-probe.mjs"), "utf8");
   assert.match(probe, /reference\.defaultSignal = listenerAbort\.signal/);
   assert.match(probe, /process\.exit\(1\)/);

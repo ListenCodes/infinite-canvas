@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { closeSync, createReadStream, openSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { createServer } from "node:net";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
@@ -25,6 +26,13 @@ const probeScript = resolve(repository, "scripts/recovery/hatchet-terminal-probe
 const verifierScript = resolve(repository, "scripts/recovery/hatchet-terminal-verify.mjs");
 const probeEvidenceScript = resolve(repository, "scripts/recovery/hatchet-terminal-evidence.mjs");
 const probeResultPrefix = "RECOVERY_HATCHET_PROBE_RESULT=";
+const recoveryPortEnvironmentKeys = [
+  "RECOVERY_BUSINESS_DB_PORT",
+  "RECOVERY_HATCHET_DB_PORT",
+  "RECOVERY_MOTO_PORT",
+  "RECOVERY_HATCHET_API_PORT",
+  "RECOVERY_HATCHET_HEALTH_PORT",
+];
 const activeChildren = new Set();
 let terminationError;
 const terminationTimers = new Set();
@@ -50,6 +58,51 @@ export function terminateChildren(children, graceMs = 5_000, schedule = setTimeo
   }, graceMs);
   timer.unref?.();
   return timer;
+}
+
+function closeServer(server) {
+  return new Promise((resolvePromise, reject) => {
+    server.close((error) => error ? reject(error) : resolvePromise());
+  });
+}
+
+export async function reserveLoopbackPorts(count) {
+  if (!Number.isInteger(count) || count < 1) throw new TypeError("Port reservation count must be a positive integer");
+  const reservations = [];
+  try {
+    for (let index = 0; index < count; index += 1) {
+      const reservation = await new Promise((resolvePromise, reject) => {
+        const server = createServer();
+        const onError = (error) => reject(error);
+        server.once("error", onError);
+        server.listen({ host: "127.0.0.1", port: 0, exclusive: true }, () => {
+          server.off("error", onError);
+          const address = server.address();
+          if (!address || typeof address === "string") {
+            server.close();
+            reject(new Error("Loopback port reservation did not return a TCP address"));
+            return;
+          }
+          resolvePromise({ port: address.port, server });
+        });
+      });
+      reservations.push(reservation);
+    }
+    let released = false;
+    return {
+      ports: reservations.map(({ port }) => port),
+      async release() {
+        if (released) return;
+        released = true;
+        const results = await Promise.allSettled(reservations.map(({ server }) => closeServer(server)));
+        const errors = results.filter(({ status }) => status === "rejected").map(({ reason }) => reason);
+        if (errors.length > 0) throw new AggregateError(errors, "Failed to release loopback port reservations");
+      },
+    };
+  } catch (error) {
+    await Promise.allSettled(reservations.map(({ server }) => closeServer(server)));
+    throw error;
+  }
 }
 
 async function writeContainerReadableSecret(path, value) {
@@ -175,6 +228,71 @@ async function publishedPort(project, environment, service, containerPort) {
   return Number(match[1]);
 }
 
+function configurePublishedPorts(environment, ports) {
+  if (ports.length !== recoveryPortEnvironmentKeys.length) throw new Error("Recovery port set is incomplete");
+  for (let index = 0; index < recoveryPortEnvironmentKeys.length; index += 1) {
+    environment[recoveryPortEnvironmentKeys[index]] = String(ports[index]);
+  }
+}
+
+async function assertPublishedPort(project, environment, service, containerPort, expectedPort) {
+  const actualPort = await publishedPort(project, environment, service, containerPort);
+  if (actualPort !== expectedPort) {
+    throw new Error(`${service}:${containerPort} published on ${actualPort}, expected reserved port ${expectedPort}`);
+  }
+}
+
+function isPortCollision(error) {
+  if (error instanceof AggregateError) return error.errors.some((nested) => isPortCollision(nested));
+  return error instanceof Error && /(?:address already in use|port is already allocated|bind for .* failed)/i.test(error.message);
+}
+
+async function startRecoveryStacks(sourceProject, sourceEnvironment, targetProject, targetEnvironment) {
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const reservation = await reserveLoopbackPorts(10);
+    const sourcePorts = reservation.ports.slice(0, 5);
+    const targetPorts = reservation.ports.slice(5, 10);
+    configurePublishedPorts(sourceEnvironment, sourcePorts);
+    configurePublishedPorts(targetEnvironment, targetPorts);
+    try {
+      await compose(sourceProject, sourceEnvironment, ["config", "--quiet"], "Source recovery Compose validation");
+      await compose(targetProject, targetEnvironment, ["config", "--quiet"], "Target recovery Compose validation");
+    } finally {
+      await reservation.release();
+    }
+    const startup = await Promise.allSettled([
+      compose(sourceProject, sourceEnvironment, ["up", "-d", "--wait", "business-db", "hatchet-db", "moto", "hatchet-lite"], "Start source recovery stack"),
+      compose(targetProject, targetEnvironment, ["up", "-d", "--wait", "business-db", "hatchet-db", "moto"], "Start empty target recovery stack"),
+    ]);
+    const startupErrors = startup.filter(({ status }) => status === "rejected").map(({ reason }) => reason);
+    if (startupErrors.length > 0) {
+      const error = startupErrors.length === 1
+        ? startupErrors[0]
+        : new AggregateError(startupErrors, "Source and target recovery stacks failed to start");
+      if (attempt === 3 || terminationError || !isPortCollision(error)) throw error;
+      const cleanup = await Promise.allSettled([
+        cleanupComposeProject(sourceProject, sourceEnvironment),
+        cleanupComposeProject(targetProject, targetEnvironment),
+      ]);
+      const cleanupErrors = cleanup.filter(({ status }) => status === "rejected").map(({ reason }) => reason);
+      if (cleanupErrors.length > 0) throw new AggregateError([error, ...cleanupErrors], "Recovery port collision cleanup failed");
+      continue;
+    }
+    await Promise.all([
+      assertPublishedPort(sourceProject, sourceEnvironment, "business-db", 5432, sourcePorts[0]),
+      assertPublishedPort(sourceProject, sourceEnvironment, "hatchet-db", 5432, sourcePorts[1]),
+      assertPublishedPort(sourceProject, sourceEnvironment, "moto", 5000, sourcePorts[2]),
+      assertPublishedPort(sourceProject, sourceEnvironment, "hatchet-lite", 8888, sourcePorts[3]),
+      assertPublishedPort(sourceProject, sourceEnvironment, "hatchet-lite", 8733, sourcePorts[4]),
+      assertPublishedPort(targetProject, targetEnvironment, "business-db", 5432, targetPorts[0]),
+      assertPublishedPort(targetProject, targetEnvironment, "hatchet-db", 5432, targetPorts[1]),
+      assertPublishedPort(targetProject, targetEnvironment, "moto", 5000, targetPorts[2]),
+    ]);
+    return { sourcePorts, targetPorts };
+  }
+  throw new Error("Recovery stacks could not reserve loopback ports");
+}
+
 async function directoryChecksums(directory) {
   const entries = [];
   async function visit(current) {
@@ -259,8 +377,8 @@ async function main() {
   };
   const sourceEnvironment = { ...baseEnvironment };
   const targetEnvironment = { ...baseEnvironment };
-  const sourcePorts = [];
-  const targetPorts = [];
+  let sourcePorts = [];
+  let targetPorts = [];
   const businessUrl = (ports, role = "postgres", rolePassword = password) =>
     `postgresql://${role}:${rolePassword}@127.0.0.1:${ports[0]}/infinite_canvas`;
   const hatchetUrl = (ports) => `postgresql://hatchet:${password}@127.0.0.1:${ports[1]}/hatchet`;
@@ -333,24 +451,12 @@ async function main() {
         },
       };
     }
-    await compose(sourceProject, sourceEnvironment, ["config", "--quiet"], "Source recovery Compose validation");
-    await compose(targetProject, targetEnvironment, ["config", "--quiet"], "Target recovery Compose validation");
-    await Promise.all([
-      compose(sourceProject, sourceEnvironment, ["up", "-d", "--wait", "business-db", "hatchet-db", "moto", "hatchet-lite"], "Start source recovery stack"),
-      compose(targetProject, targetEnvironment, ["up", "-d", "--wait", "business-db", "hatchet-db", "moto"], "Start empty target recovery stack"),
-    ]);
-    sourcePorts.push(
-      await publishedPort(sourceProject, sourceEnvironment, "business-db", 5432),
-      await publishedPort(sourceProject, sourceEnvironment, "hatchet-db", 5432),
-      await publishedPort(sourceProject, sourceEnvironment, "moto", 5000),
-      await publishedPort(sourceProject, sourceEnvironment, "hatchet-lite", 8888),
-      await publishedPort(sourceProject, sourceEnvironment, "hatchet-lite", 8733),
-    );
-    targetPorts.push(
-      await publishedPort(targetProject, targetEnvironment, "business-db", 5432),
-      await publishedPort(targetProject, targetEnvironment, "hatchet-db", 5432),
-      await publishedPort(targetProject, targetEnvironment, "moto", 5000),
-    );
+    ({ sourcePorts, targetPorts } = await startRecoveryStacks(
+      sourceProject,
+      sourceEnvironment,
+      targetProject,
+      targetEnvironment,
+    ));
     await compose(sourceProject, sourceEnvironment, ["run", "--rm", "database-migrate"], "Migrate source business database");
     await waitForUrl(`${hatchetHealth(sourcePorts)}/ready`);
     await waitForUrl(`${hatchetApi(sourcePorts)}/api/ready`);
@@ -412,10 +518,10 @@ async function main() {
     await compose(targetProject, targetEnvironment, ["create", "hatchet-lite"], "Create target Hatchet control plane");
     await compose(targetProject, targetEnvironment, ["cp", `${sourceConfigDirectory}${sep}.`, "hatchet-lite:/config/"], "Restore target Hatchet config");
     await compose(targetProject, targetEnvironment, ["up", "-d", "--wait", "hatchet-lite"], "Start restored Hatchet control plane");
-    targetPorts.push(
-      await publishedPort(targetProject, targetEnvironment, "hatchet-lite", 8888),
-      await publishedPort(targetProject, targetEnvironment, "hatchet-lite", 8733),
-    );
+    await Promise.all([
+      assertPublishedPort(targetProject, targetEnvironment, "hatchet-lite", 8888, targetPorts[3]),
+      assertPublishedPort(targetProject, targetEnvironment, "hatchet-lite", 8733, targetPorts[4]),
+    ]);
     await waitForUrl(`${hatchetHealth(targetPorts)}/ready`);
     await waitForUrl(`${hatchetApi(targetPorts)}/api/ready`);
     const targetVersion = await waitForUrl(`${hatchetHealth(targetPorts)}/version`);

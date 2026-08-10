@@ -643,7 +643,7 @@ export class GenerationService {
     userId: string,
     projectId: string,
   ): Promise<ActiveJobsSnapshot> {
-    return this.sql.begin("repeatable read read only", async (transaction) => {
+    return this.sql.begin("isolation level repeatable read read only", async (transaction) => {
       await setUserContext(transaction, userId);
       const projects = await transaction<
         { id: string; workspace_id: string; version: number }[]
@@ -706,7 +706,7 @@ export class GenerationService {
     userId: string,
     batchId: string,
   ): Promise<GenerationBatchSnapshot> {
-    return this.sql.begin("repeatable read read only", async (transaction) => {
+    return this.sql.begin("isolation level repeatable read read only", async (transaction) => {
       await setUserContext(transaction, userId);
       const batches = await transaction<
         {
@@ -805,7 +805,7 @@ export class GenerationService {
         );
       }
     }
-    return this.sql.begin("repeatable read", async (transaction) => {
+    return this.sql.begin("isolation level repeatable read", async (transaction) => {
       await setUserContext(transaction, userId);
       const rows = await transaction<
         (JobRow & {

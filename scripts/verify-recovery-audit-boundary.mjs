@@ -27,7 +27,7 @@ for (const forbidden of [
 }
 for (const required of [
   'mode: "read_only_no_hatchet_no_provider"',
-  '"repeatable read read only"',
+  '"isolation level repeatable read read only"',
   "ListObjectsV2Command",
   "GetObjectCommand",
 ]) {
