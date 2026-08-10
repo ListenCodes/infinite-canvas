@@ -5,7 +5,6 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${RECOVERY_POSTGRES_PASSWORD:?required}
       POSTGRES_DB: infinite_canvas
-    ports: ["127.0.0.1:${RECOVERY_BUSINESS_DB_PORT:?required}:5432"]
     volumes: ["business-data:/var/lib/postgresql/data"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d infinite_canvas"]
@@ -20,7 +19,6 @@ services:
       POSTGRES_USER: hatchet
       POSTGRES_PASSWORD: ${RECOVERY_POSTGRES_PASSWORD:?required}
       POSTGRES_DB: hatchet
-    ports: ["127.0.0.1:${RECOVERY_HATCHET_DB_PORT:?required}:5432"]
     volumes: ["hatchet-data:/var/lib/postgresql/data"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U hatchet -d hatchet"]
@@ -34,7 +32,6 @@ services:
     environment:
       MOTO_HOST: 0.0.0.0
       MOTO_PORT: "5000"
-    ports: ["127.0.0.1:${RECOVERY_MOTO_PORT:?required}:5000"]
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; s=socket.socket(); s.settimeout(2); raise SystemExit(s.connect_ex(('127.0.0.1', 5000)))"]
       interval: 3s
@@ -56,9 +53,6 @@ services:
       SERVER_GRPC_INSECURE: "true"
       SERVER_INTERNAL_CLIENT_INTERNAL_GRPC_BROADCAST_ADDRESS: hatchet-lite:7077
       SERVER_MSGQUEUE_KIND: postgres
-    ports:
-      - "127.0.0.1:${RECOVERY_HATCHET_API_PORT:?required}:8888"
-      - "127.0.0.1:${RECOVERY_HATCHET_HEALTH_PORT:?required}:8733"
     volumes: ["hatchet-config:/config"]
     depends_on:
       hatchet-db: { condition: service_healthy }
@@ -69,6 +63,35 @@ services:
       retries: 60
       start_period: 15s
     networks: [hatchet-control, hatchet-api]
+
+  recovery-host-access:
+    image: ${API_IMAGE:-infinite-canvas-api:gate}
+    command: ["node", "/run/recovery-host-access.mjs"]
+    ports:
+      - "127.0.0.1:${RECOVERY_BUSINESS_DB_PORT:?required}:15432"
+      - "127.0.0.1:${RECOVERY_HATCHET_DB_PORT:?required}:15433"
+      - "127.0.0.1:${RECOVERY_MOTO_PORT:?required}:15000"
+      - "127.0.0.1:${RECOVERY_HATCHET_API_PORT:?required}:18888"
+      - "127.0.0.1:${RECOVERY_HATCHET_HEALTH_PORT:?required}:18733"
+    volumes:
+      - type: bind
+        source: ${RECOVERY_HOST_ACCESS_PATH:?required}
+        target: /run/recovery-host-access.mjs
+        read_only: true
+    depends_on:
+      business-db: { condition: service_healthy }
+      hatchet-db: { condition: service_healthy }
+      moto: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "node", "-e", "const s=require('node:net').connect(15432,'127.0.0.1');s.once('connect',()=>{s.destroy();process.exit(0)});s.once('error',()=>process.exit(1));setTimeout(()=>process.exit(1),2000)"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=64m"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    networks: [recovery-data, hatchet-control, hatchet-api, recovery-host]
 
   database-migrate:
     profiles: ["tools"]
@@ -170,6 +193,7 @@ networks:
   recovery-data: { internal: true }
   hatchet-control: { internal: true }
   hatchet-api: { internal: true }
+  recovery-host: { internal: false }
 
 secrets:
   recovery-hatchet-client-token:

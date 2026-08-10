@@ -271,13 +271,54 @@ for (const forbidden of [
 }
 const recoveryTopology = parse(recoveryCompose);
 const recoveryNetworks = Object.entries(recoveryTopology?.networks ?? {});
-if (
-  recoveryNetworks.length === 0 ||
-  recoveryNetworks.some(([, definition]) => definition?.internal !== true)
-) {
+const expectedRecoveryNetworks = ["recovery-data", "hatchet-control", "hatchet-api", "recovery-host"];
+if (JSON.stringify(recoveryNetworks.map(([name]) => name).sort()) !== JSON.stringify([...expectedRecoveryNetworks].sort())) {
   errors.push(
-    "infra/compose/recovery/compose.yaml: every recovery network must be internal",
+    "infra/compose/recovery/compose.yaml: recovery network set is invalid",
   );
+}
+for (const name of expectedRecoveryNetworks.slice(0, 3)) {
+  if (recoveryTopology?.networks?.[name]?.internal !== true) {
+    errors.push(`infra/compose/recovery/compose.yaml: ${name} must be internal`);
+  }
+}
+if (recoveryTopology?.networks?.["recovery-host"]?.internal !== false) {
+  errors.push("infra/compose/recovery/compose.yaml: recovery-host must be the only host-facing network");
+}
+const recoveryHostAccess = recoveryTopology?.services?.["recovery-host-access"];
+if (!recoveryHostAccess) {
+  errors.push("infra/compose/recovery/compose.yaml: recovery-host-access service is required");
+} else {
+  const expectedNetworks = ["recovery-data", "hatchet-control", "hatchet-api", "recovery-host"];
+  if (JSON.stringify(recoveryHostAccess.networks) !== JSON.stringify(expectedNetworks)) {
+    errors.push("infra/compose/recovery/compose.yaml: recovery-host-access networks are invalid");
+  }
+  if (recoveryHostAccess.environment || recoveryHostAccess.secrets) {
+    errors.push("infra/compose/recovery/compose.yaml: recovery-host-access must not receive environment values or secrets");
+  }
+  if (recoveryHostAccess.read_only !== true || JSON.stringify(recoveryHostAccess.cap_drop) !== JSON.stringify(["ALL"])) {
+    errors.push("infra/compose/recovery/compose.yaml: recovery-host-access must be read-only and drop all capabilities");
+  }
+  const expectedPorts = [
+    "127.0.0.1:${RECOVERY_BUSINESS_DB_PORT:?required}:15432",
+    "127.0.0.1:${RECOVERY_HATCHET_DB_PORT:?required}:15433",
+    "127.0.0.1:${RECOVERY_MOTO_PORT:?required}:15000",
+    "127.0.0.1:${RECOVERY_HATCHET_API_PORT:?required}:18888",
+    "127.0.0.1:${RECOVERY_HATCHET_HEALTH_PORT:?required}:18733",
+  ];
+  if (JSON.stringify(recoveryHostAccess.ports) !== JSON.stringify(expectedPorts)) {
+    errors.push("infra/compose/recovery/compose.yaml: recovery-host-access loopback mappings are invalid");
+  }
+}
+for (const [name, service] of Object.entries(recoveryTopology?.services ?? {})) {
+  if (name !== "recovery-host-access" && service?.networks?.includes?.("recovery-host")) {
+    errors.push(`infra/compose/recovery/compose.yaml: ${name} must not join recovery-host`);
+  }
+}
+for (const name of ["business-db", "hatchet-db", "moto", "hatchet-lite"]) {
+  if (recoveryTopology?.services?.[name]?.ports) {
+    errors.push(`infra/compose/recovery/compose.yaml: ${name} must not publish host ports directly`);
+  }
 }
 
 const ossSmokePath = "infra/compose/oss/smoke.override.yaml";

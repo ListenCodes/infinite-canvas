@@ -442,19 +442,33 @@ test("recovery topology isolates the Hatchet observer from application data and 
   for (const network of ["recovery-data", "hatchet-control", "hatchet-api"]) {
     assert.equal(parsed.networks[network].internal, true);
   }
+  assert.equal(parsed.networks["recovery-host"].internal, false);
   for (const forbidden of ["  api:", "  worker:", "extra_hosts:", "OUTBOX_DISPATCHER_ENABLED", "UNKNOWN_RECONCILER_ENABLED", "PROVIDER_"]) {
     assert.doesNotMatch(compose, new RegExp(forbidden.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
-  for (const required of ["business-db:", "hatchet-db:", "hatchet-lite:", "moto:", "recovery-audit:", "hatchet-terminal-observer:"]) {
+  for (const required of ["business-db:", "hatchet-db:", "hatchet-lite:", "moto:", "recovery-host-access:", "recovery-audit:", "hatchet-terminal-observer:"]) {
     assert.ok(compose.includes(required), required);
   }
-  assert.deepEqual(parsed.services["business-db"].ports, ["127.0.0.1:${RECOVERY_BUSINESS_DB_PORT:?required}:5432"]);
-  assert.deepEqual(parsed.services["hatchet-db"].ports, ["127.0.0.1:${RECOVERY_HATCHET_DB_PORT:?required}:5432"]);
-  assert.deepEqual(parsed.services.moto.ports, ["127.0.0.1:${RECOVERY_MOTO_PORT:?required}:5000"]);
-  assert.deepEqual(parsed.services["hatchet-lite"].ports, [
-    "127.0.0.1:${RECOVERY_HATCHET_API_PORT:?required}:8888",
-    "127.0.0.1:${RECOVERY_HATCHET_HEALTH_PORT:?required}:8733",
+  for (const service of ["business-db", "hatchet-db", "moto", "hatchet-lite"]) {
+    assert.equal(parsed.services[service].ports, undefined, service);
+  }
+  const hostAccess = parsed.services["recovery-host-access"];
+  assert.deepEqual(hostAccess.ports, [
+    "127.0.0.1:${RECOVERY_BUSINESS_DB_PORT:?required}:15432",
+    "127.0.0.1:${RECOVERY_HATCHET_DB_PORT:?required}:15433",
+    "127.0.0.1:${RECOVERY_MOTO_PORT:?required}:15000",
+    "127.0.0.1:${RECOVERY_HATCHET_API_PORT:?required}:18888",
+    "127.0.0.1:${RECOVERY_HATCHET_HEALTH_PORT:?required}:18733",
   ]);
+  assert.deepEqual(hostAccess.networks, ["recovery-data", "hatchet-control", "hatchet-api", "recovery-host"]);
+  assert.equal(hostAccess.environment, undefined);
+  assert.equal(hostAccess.secrets, undefined);
+  assert.equal(hostAccess.read_only, true);
+  assert.deepEqual(hostAccess.cap_drop, ["ALL"]);
+  assert.match(hostAccess.volumes[0].source, /RECOVERY_HOST_ACCESS_PATH/);
+  for (const [name, service] of Object.entries(parsed.services)) {
+    if (name !== "recovery-host-access") assert.equal(service.networks?.includes("recovery-host") ?? false, false, name);
+  }
   assert.match(compose, /HATCHET_CLIENT_TOKEN_FILE: \/run\/secrets\/hatchet-client-token/);
   assert.match(compose, /source: recovery-hatchet-client-token/);
   assert.match(compose, /read_only: true/);
@@ -470,6 +484,11 @@ test("recovery topology isolates the Hatchet observer from application data and 
   assert.deepEqual([...observerNetworks], ["hatchet-api"]);
   for (const service of ["business-db", "moto", "hatchet-db"]) {
     assert.equal(parsed.services[service].networks.some((network) => observerNetworks.has(network)), false, service);
+  }
+  const hostAccessScript = await readFile(resolve(repository, "scripts/recovery/host-access.mjs"), "utf8");
+  for (const target of ["business-db", "hatchet-db", "moto", "hatchet-lite"]) assert.match(hostAccessScript, new RegExp(target));
+  for (const forbidden of ["process.env", "BUSINESS_DATABASE", "S3_", "PROVIDER", "HATCHET_CLIENT_TOKEN"]) {
+    assert.doesNotMatch(hostAccessScript, new RegExp(forbidden));
   }
   const verifier = await readFile(resolve(repository, "scripts/recovery/hatchet-terminal-verify.mjs"), "utf8");
   for (const forbidden of [".task(", ".worker(", "runNoWait"]) assert.doesNotMatch(verifier, new RegExp(forbidden.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
@@ -488,6 +507,8 @@ test("drill emits only a redacted report and cleans exact temporary projects", a
   assert.match(script, /if \(probeTokenPath\) await writeContainerReadableSecret\(probeTokenPath, ""\)/);
   assert.match(script, /process\.on\(signal, handler\)/);
   assert.match(script, /publishedPort/);
+  assert.match(script, /RECOVERY_HOST_ACCESS_PATH/);
+  assert.match(script, /recovery-host-access/);
   assert.match(script, /reserveLoopbackPorts/);
   const probe = await readFile(resolve(repository, "scripts/recovery/hatchet-terminal-probe.mjs"), "utf8");
   assert.match(probe, /reference\.defaultSignal = listenerAbort\.signal/);

@@ -25,6 +25,7 @@ const composeFile = resolve(repository, "infra/compose/recovery/compose.yaml");
 const probeScript = resolve(repository, "scripts/recovery/hatchet-terminal-probe.mjs");
 const verifierScript = resolve(repository, "scripts/recovery/hatchet-terminal-verify.mjs");
 const probeEvidenceScript = resolve(repository, "scripts/recovery/hatchet-terminal-evidence.mjs");
+const hostAccessScript = resolve(repository, "scripts/recovery/host-access.mjs");
 const probeResultPrefix = "RECOVERY_HATCHET_PROBE_RESULT=";
 const recoveryPortEnvironmentKeys = [
   "RECOVERY_BUSINESS_DB_PORT",
@@ -261,8 +262,8 @@ async function startRecoveryStacks(sourceProject, sourceEnvironment, targetProje
       await reservation.release();
     }
     const startup = await Promise.allSettled([
-      compose(sourceProject, sourceEnvironment, ["up", "-d", "--wait", "business-db", "hatchet-db", "moto", "hatchet-lite"], "Start source recovery stack"),
-      compose(targetProject, targetEnvironment, ["up", "-d", "--wait", "business-db", "hatchet-db", "moto"], "Start empty target recovery stack"),
+      compose(sourceProject, sourceEnvironment, ["up", "-d", "--wait", "business-db", "hatchet-db", "moto", "hatchet-lite", "recovery-host-access"], "Start source recovery stack"),
+      compose(targetProject, targetEnvironment, ["up", "-d", "--wait", "business-db", "hatchet-db", "moto", "recovery-host-access"], "Start empty target recovery stack"),
     ]);
     const startupErrors = startup.filter(({ status }) => status === "rejected").map(({ reason }) => reason);
     if (startupErrors.length > 0) {
@@ -279,14 +280,14 @@ async function startRecoveryStacks(sourceProject, sourceEnvironment, targetProje
       continue;
     }
     await Promise.all([
-      assertPublishedPort(sourceProject, sourceEnvironment, "business-db", 5432, sourcePorts[0]),
-      assertPublishedPort(sourceProject, sourceEnvironment, "hatchet-db", 5432, sourcePorts[1]),
-      assertPublishedPort(sourceProject, sourceEnvironment, "moto", 5000, sourcePorts[2]),
-      assertPublishedPort(sourceProject, sourceEnvironment, "hatchet-lite", 8888, sourcePorts[3]),
-      assertPublishedPort(sourceProject, sourceEnvironment, "hatchet-lite", 8733, sourcePorts[4]),
-      assertPublishedPort(targetProject, targetEnvironment, "business-db", 5432, targetPorts[0]),
-      assertPublishedPort(targetProject, targetEnvironment, "hatchet-db", 5432, targetPorts[1]),
-      assertPublishedPort(targetProject, targetEnvironment, "moto", 5000, targetPorts[2]),
+      assertPublishedPort(sourceProject, sourceEnvironment, "recovery-host-access", 15432, sourcePorts[0]),
+      assertPublishedPort(sourceProject, sourceEnvironment, "recovery-host-access", 15433, sourcePorts[1]),
+      assertPublishedPort(sourceProject, sourceEnvironment, "recovery-host-access", 15000, sourcePorts[2]),
+      assertPublishedPort(sourceProject, sourceEnvironment, "recovery-host-access", 18888, sourcePorts[3]),
+      assertPublishedPort(sourceProject, sourceEnvironment, "recovery-host-access", 18733, sourcePorts[4]),
+      assertPublishedPort(targetProject, targetEnvironment, "recovery-host-access", 15432, targetPorts[0]),
+      assertPublishedPort(targetProject, targetEnvironment, "recovery-host-access", 15433, targetPorts[1]),
+      assertPublishedPort(targetProject, targetEnvironment, "recovery-host-access", 15000, targetPorts[2]),
     ]);
     return { sourcePorts, targetPorts };
   }
@@ -413,6 +414,7 @@ async function main() {
     for (const environment of [sourceEnvironment, targetEnvironment]) {
       Object.assign(environment, {
         RECOVERY_HATCHET_TOKEN_FILE: probeTokenPath,
+        RECOVERY_HOST_ACCESS_PATH: hostAccessScript,
         RECOVERY_PROBE_EVIDENCE_PATH: probeEvidenceScript,
         RECOVERY_PROBE_STATE_DIRECTORY: probeStateDirectory,
       });
@@ -519,8 +521,8 @@ async function main() {
     await compose(targetProject, targetEnvironment, ["cp", `${sourceConfigDirectory}${sep}.`, "hatchet-lite:/config/"], "Restore target Hatchet config");
     await compose(targetProject, targetEnvironment, ["up", "-d", "--wait", "hatchet-lite"], "Start restored Hatchet control plane");
     await Promise.all([
-      assertPublishedPort(targetProject, targetEnvironment, "hatchet-lite", 8888, targetPorts[3]),
-      assertPublishedPort(targetProject, targetEnvironment, "hatchet-lite", 8733, targetPorts[4]),
+      assertPublishedPort(targetProject, targetEnvironment, "recovery-host-access", 18888, targetPorts[3]),
+      assertPublishedPort(targetProject, targetEnvironment, "recovery-host-access", 18733, targetPorts[4]),
     ]);
     await waitForUrl(`${hatchetHealth(targetPorts)}/ready`);
     await waitForUrl(`${hatchetApi(targetPorts)}/api/ready`);
