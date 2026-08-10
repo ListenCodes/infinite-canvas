@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { test } from "node:test";
 
 import postgres from "postgres";
+import { generationWorkflowInputSchema } from "@infinite-canvas/contracts";
 
 import { EventBroker, EventService } from "./events.js";
 import { AssetService } from "./services/assets.js";
@@ -71,6 +72,12 @@ test("ten concurrent idempotent creates and failed-slot retries preserve exact c
         on conflict do nothing
       `;
       await transaction`
+        insert into provider_channel_capacity_policies (
+          channel_id, capability, version, concurrency_limit, rate_limit_per_minute
+        ) values (${channelId}, 'image', 1, 3, 60)
+        on conflict do nothing
+      `;
+      await transaction`
         insert into model_prices (id, model_config_id, version, conditions_json, credit_amount, effective_at)
         values (${priceId}, ${modelId}, 1, '{}'::jsonb, 10, now() - interval '1 minute') on conflict do nothing
       `;
@@ -98,7 +105,8 @@ test("ten concurrent idempotent creates and failed-slot retries preserve exact c
       await transaction`select set_config('app.service_role', 'on', true)`;
       return transaction<{
         batches: number; jobs: number; attempts: number; reservations: number; outbox: number;
-        requests: number; available: string; reserved: string;
+        requests: number; capacitySnapshots: number; capacityPayloads: number;
+        available: string; reserved: string;
       }[]>`
         select
           (select count(*)::int from generation_batches where id = ${batchId}) as batches,
@@ -107,11 +115,28 @@ test("ten concurrent idempotent creates and failed-slot retries preserve exact c
           (select count(*)::int from credit_reservations where job_id in (select id from generation_jobs where batch_id = ${batchId})) as reservations,
           (select count(*)::int from outbox_events where aggregate_id in (select id from generation_jobs where batch_id = ${batchId})) as outbox,
           (select count(*)::int from idempotency_requests where workspace_id = ${workspaceId} and operation = 'batch.create' and key = 'batch-concurrency-key-0001') as requests,
+          (select count(*)::int from generation_attempts
+             where job_id in (select id from generation_jobs where batch_id = ${batchId})
+               and capacity_policy_version = 1 and workspace_concurrency_limit = 3
+               and workspace_rate_limit_per_minute = 30 and channel_concurrency_limit = 3
+               and channel_rate_limit_per_minute = 60) as "capacitySnapshots",
+           (select count(*)::int from outbox_events
+              where aggregate_id in (select id from generation_jobs where batch_id = ${batchId})
+                and payload->>'schemaVersion' = '2'
+                and payload->>'workflowName' = 'media-generation-v2'
+                and payload->'capacity' = jsonb_build_object(
+                 'policyVersion', 1, 'workspaceConcurrencyLimit', 3,
+                 'workspaceRateLimitPerMinute', 30, 'channelConcurrencyLimit', 3,
+                 'channelRateLimitPerMinute', 60
+               )) as "capacityPayloads",
           (select available::text from wallet_accounts where workspace_id = ${workspaceId}) as available,
           (select reserved::text from wallet_accounts where workspace_id = ${workspaceId}) as reserved
       `;
     });
-    assert.deepEqual(counts[0], { batches: 1, jobs: 3, attempts: 3, reservations: 3, outbox: 3, requests: 1, available: "970", reserved: "30" });
+    assert.deepEqual(counts[0], {
+      batches: 1, jobs: 3, attempts: 3, reservations: 3, outbox: 3, requests: 1,
+      capacitySnapshots: 3, capacityPayloads: 3, available: "970", reserved: "30",
+    });
 
     await sql.begin(async (transaction) => {
       await transaction`select set_config('app.service_role', 'on', true)`;
@@ -150,6 +175,31 @@ test("ten concurrent idempotent creates and failed-slot retries preserve exact c
     );
     await Promise.all(failed.map((job, index) => service.retryJob(userId, job.jobId, `failed-slot-retry-key-000${index}`)));
     await Promise.all(failed.map((job, index) => service.retryJob(userId, job.jobId, `failed-slot-retry-key-000${index}`)));
+    const retryCapacity = await sql.begin(async (transaction) => {
+      await transaction`select set_config('app.service_role', 'on', true)`;
+      return transaction<{ valid: number }[]>`
+        select count(*)::int as valid
+        from generation_jobs job
+        join generation_attempts attempt on attempt.id = job.current_attempt_id
+        join outbox_events event on event.aggregate_id = job.id
+          and event.payload->>'attemptId' = attempt.id::text
+        where job.id in ${transaction(failed.map(({ jobId }) => jobId))}
+          and attempt.attempt_no = 2
+          and attempt.capacity_policy_version = 1
+          and attempt.workspace_concurrency_limit = 3
+          and attempt.workspace_rate_limit_per_minute = 30
+          and attempt.channel_concurrency_limit = 3
+          and attempt.channel_rate_limit_per_minute = 60
+          and event.payload->>'schemaVersion' = '2'
+          and event.payload->>'workflowName' = 'media-generation-v2'
+          and event.payload->'capacity' = jsonb_build_object(
+            'policyVersion', 1, 'workspaceConcurrencyLimit', 3,
+            'workspaceRateLimitPerMinute', 30, 'channelConcurrencyLimit', 3,
+            'channelRateLimitPerMinute', 60
+          )
+      `;
+    });
+    assert.equal(retryCapacity[0]?.valid, 2);
     const afterRetry = await service.getBatch(userId, batchId);
     const preserved = afterRetry.jobs.find(({ jobId }) => jobId === succeeded.jobId);
     assert.equal(preserved?.attemptId, succeeded.attemptId);
@@ -450,19 +500,31 @@ test("ten concurrent idempotent creates and failed-slot retries preserve exact c
           release_after: Date | null;
           reservation_status: string;
           recovery_outbox: number;
+          recovery_payload: unknown;
+          capacity_policy_version: number;
+          workspace_concurrency_limit: number;
+          workspace_rate_limit_per_minute: number;
+          channel_concurrency_limit: number;
+          channel_rate_limit_per_minute: number;
         }[]>`
           select attempt.status as attempt_status, job.status as job_status, attempt.provider_task_id,
                  attempt.business_deadline_at >= now() + interval '29 minutes' as deadline_extended,
                  attempt.reconcile_after, attempt.release_after, reservation.status as reservation_status,
                  (select count(*)::int from outbox_events event
-                  where event.aggregate_id = job.id and event.dedupe_key = 'generation.job.reconciled:' || attempt.id::text || ':unknown-accepted-resolution-0001') as recovery_outbox
+                  where event.aggregate_id = job.id and event.dedupe_key = 'generation.job.reconciled:' || attempt.id::text || ':unknown-accepted-resolution-0001') as recovery_outbox,
+                 (select event.payload from outbox_events event
+                  where event.aggregate_id = job.id and event.dedupe_key = 'generation.job.reconciled:' || attempt.id::text || ':unknown-accepted-resolution-0001') as recovery_payload,
+                 attempt.capacity_policy_version, attempt.workspace_concurrency_limit,
+                 attempt.workspace_rate_limit_per_minute, attempt.channel_concurrency_limit,
+                 attempt.channel_rate_limit_per_minute
           from generation_attempts attempt
           join generation_jobs job on job.current_attempt_id = attempt.id
           join credit_reservations reservation on reservation.attempt_id = attempt.id
           where attempt.id = ${unknownCandidate.attemptId}
         `;
       });
-      assert.deepEqual(reconciled[0], {
+      const { recovery_payload: recoveryPayload, ...reconciledState } = reconciled[0]!;
+      assert.deepEqual(reconciledState, {
         attempt_status: "accepted",
         job_status: "waiting_provider",
         provider_task_id: "provider-task-confirmed-0001",
@@ -471,6 +533,30 @@ test("ten concurrent idempotent creates and failed-slot retries preserve exact c
         release_after: null,
         reservation_status: "reserved",
         recovery_outbox: 1,
+        capacity_policy_version: 1,
+        workspace_concurrency_limit: 3,
+        workspace_rate_limit_per_minute: 30,
+        channel_concurrency_limit: 3,
+        channel_rate_limit_per_minute: 60,
+      });
+      const recoveryInput = generationWorkflowInputSchema.parse(recoveryPayload);
+      assert.deepEqual(recoveryInput, {
+        schemaVersion: 2,
+        workflowName: "media-generation-v2",
+        workspaceId,
+        projectId,
+        batchId,
+        jobId: unknownCandidate.jobId,
+        attemptId: unknownCandidate.attemptId,
+        capability: "image",
+        channelId,
+        capacity: {
+          policyVersion: reconciledState.capacity_policy_version,
+          workspaceConcurrencyLimit: reconciledState.workspace_concurrency_limit,
+          workspaceRateLimitPerMinute: reconciledState.workspace_rate_limit_per_minute,
+          channelConcurrencyLimit: reconciledState.channel_concurrency_limit,
+          channelRateLimitPerMinute: reconciledState.channel_rate_limit_per_minute,
+        },
       });
       const reconciledProjection = (await idempotencyAdminService.jobsPage({ limit: 100 })).items.find(
         (item) => item.attemptId === unknownCandidate.attemptId,
@@ -534,6 +620,7 @@ test("ten concurrent idempotent creates and failed-slot retries preserve exact c
         adapterType: "openai",
         adapterVersion: 1,
         concurrencyLimit: 2,
+        rateLimitPerMinute: 45,
         providerIdempotencySupported: false,
         creditAmount: "3",
         limits: { maxCount: 3 },
@@ -541,17 +628,35 @@ test("ten concurrent idempotent creates and failed-slot retries preserve exact c
       const modelA = await idempotencyAdminService.createModel(userId, idempotentChannelId, modelInput, modelKey);
       const modelB = await idempotencyAdminService.createModel(userId, idempotentChannelId, modelInput, modelKey);
       assert.deepEqual(modelB, modelA);
+      await idempotencyAdminService.createModel(
+        userId,
+        idempotentChannelId,
+        { ...modelInput, model: "integration-idempotent-image-2" },
+        "admin-model-create-same-capacity-0002",
+      );
       const adminIdempotencyCounts = await sql.begin(async (transaction) => {
         await transaction`select set_config('app.service_role', 'on', true)`;
-        return transaction<{ requests: number; channels: number; credentials: number; models: number }[]>`
+        return transaction<{
+          requests: number; channels: number; credentials: number; models: number;
+          policies: number; concurrencyLimit: number; rateLimitPerMinute: number;
+        }[]>`
           select
             (select count(*)::int from platform_idempotency_requests where actor_user_id = ${userId}) as requests,
             (select count(*)::int from provider_channels where id = ${idempotentChannelId}) as channels,
             (select count(*)::int from provider_credentials where channel_id = ${idempotentChannelId}) as credentials,
-            (select count(*)::int from model_configs where id = ${modelA.modelConfigId}) as models
+            (select count(*)::int from model_configs where channel_id = ${idempotentChannelId}) as models,
+            (select count(*)::int from provider_channel_capacity_policies
+              where channel_id = ${idempotentChannelId} and capability = 'image') as policies,
+            (select concurrency_limit from provider_channel_capacity_policies
+              where channel_id = ${idempotentChannelId} and capability = 'image' order by version desc limit 1) as "concurrencyLimit",
+            (select rate_limit_per_minute from provider_channel_capacity_policies
+              where channel_id = ${idempotentChannelId} and capability = 'image' order by version desc limit 1) as "rateLimitPerMinute"
         `;
       });
-      assert.deepEqual(adminIdempotencyCounts[0], { requests: 3, channels: 1, credentials: 1, models: 1 });
+      assert.deepEqual(adminIdempotencyCounts[0], {
+        requests: 4, channels: 1, credentials: 1, models: 2,
+        policies: 1, concurrencyLimit: 2, rateLimitPerMinute: 45,
+      });
       const paginationTimestamp = "2026-08-10T00:00:00.000Z";
       await sql.begin(async (transaction) => {
         await transaction`select set_config('app.service_role', 'on', true)`;

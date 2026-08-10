@@ -41,8 +41,10 @@ test("real PostgreSQL enforces migrations, runtime roles, RLS, and LISTEN/NOTIFY
     BUSINESS_DATABASE_RECOVERY_AUDIT_ROLE: "infinite_canvas_recovery_test",
     BUSINESS_DATABASE_RECOVERY_AUDIT_PASSWORD: passwordRecovery,
   });
-  const finalMigrations = await migrateDatabase(migrationUrl);
-  assert.deepEqual(finalMigrations, [
+  const postProvisionMigrations = await migrateDatabase(migrationUrl, {
+    through: "custom/0012_runtime_acl_hardening.sql",
+  });
+  assert.deepEqual(postProvisionMigrations, [
     "custom/0009_attempt_recovery_claim.sql",
     "drizzle/0008_swift_the_professor.sql",
     "custom/0010_platform_idempotency.sql",
@@ -50,6 +52,77 @@ test("real PostgreSQL enforces migrations, runtime roles, RLS, and LISTEN/NOTIFY
     "drizzle/0009_adorable_captain_midlands.sql",
     "drizzle/0010_clammy_susan_delgado.sql",
     "custom/0012_runtime_acl_hardening.sql",
+  ]);
+  const legacyUserId = randomUUID();
+  const legacyWorkspaceId = randomUUID();
+  const legacyProjectId = randomUUID();
+  const legacyChannelId = randomUUID();
+  const legacyModelId = randomUUID();
+  const legacyRequestId = randomUUID();
+  const legacyBatchId = randomUUID();
+  const legacyJobId = randomUUID();
+  const legacyAttemptId = randomUUID();
+  const legacyOutboxId = randomUUID();
+  const legacyDispatchToken = randomUUID();
+  const stagingAdmin = postgres(adminUrl, { max: 1, prepare: false });
+  try {
+    await stagingAdmin.begin(async (transaction) => {
+      await transaction`insert into profiles (user_id, display_name) values (${legacyUserId}, 'Legacy Capacity User')`;
+      await transaction`insert into workspaces (id, owner_user_id, name) values (${legacyWorkspaceId}, ${legacyUserId}, 'Legacy Capacity Workspace')`;
+      await transaction`insert into workspace_members (workspace_id, user_id, role) values (${legacyWorkspaceId}, ${legacyUserId}, 'owner')`;
+      await transaction`insert into projects (id, workspace_id, title, document_json, updated_by) values (${legacyProjectId}, ${legacyWorkspaceId}, 'Legacy Capacity Project', '{}'::jsonb, ${legacyUserId})`;
+      await transaction`insert into provider_channels (id, name, type, base_url, capabilities) values (${legacyChannelId}, 'Legacy Capacity Provider', 'openai', 'https://provider.example', '["image"]'::jsonb)`;
+      await transaction`
+        insert into model_configs (
+          id, channel_id, model, capability, adapter_type, adapter_version,
+          config_version, limits_json, concurrency_limit
+        ) values (${legacyModelId}, ${legacyChannelId}, 'legacy-capacity-image', 'image', 'openai', 1, 1, '{}'::jsonb, 4)
+      `;
+      await transaction`
+        insert into idempotency_requests (id, workspace_id, operation, key, request_hash, expires_at)
+        values (${legacyRequestId}, ${legacyWorkspaceId}, 'batch.create', 'legacy-capacity-prefix', 'legacy-capacity-hash', now() + interval '1 day')
+      `;
+      await transaction`
+        insert into generation_batches (id, workspace_id, project_id, kind, requested_count, idempotency_request_id, created_by)
+        values (${legacyBatchId}, ${legacyWorkspaceId}, ${legacyProjectId}, 'image', 1, ${legacyRequestId}, ${legacyUserId})
+      `;
+      await transaction`
+        insert into generation_jobs (
+          id, workspace_id, batch_id, slot_index, capability, model_config_id,
+          model_snapshot, price_snapshot, input_snapshot, estimated_credits
+        ) values (${legacyJobId}, ${legacyWorkspaceId}, ${legacyBatchId}, 0, 'image', ${legacyModelId}, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, 1)
+      `;
+      await transaction`
+        insert into generation_attempts (
+          id, workspace_id, job_id, attempt_no, channel_id, credential_version,
+          adapter_type, adapter_version, request_fingerprint, business_deadline_at,
+          executor_dispatch_token
+        ) values (${legacyAttemptId}, ${legacyWorkspaceId}, ${legacyJobId}, 1, ${legacyChannelId}, 1, 'openai', 1, 'legacy-capacity-fingerprint', now() + interval '30 minutes', ${legacyDispatchToken})
+      `;
+      await transaction`update generation_jobs set current_attempt_id = ${legacyAttemptId} where id = ${legacyJobId}`;
+      await transaction`
+        insert into outbox_events (id, workspace_id, topic, aggregate_id, dedupe_key, payload)
+        values (
+          ${legacyOutboxId}, ${legacyWorkspaceId}, 'generation.job.requested', ${legacyJobId},
+          'legacy-capacity-prefix-outbox', jsonb_build_object(
+            'schemaVersion', 1, 'workflowName', 'media-generation-v1',
+            'workspaceId', ${legacyWorkspaceId}::text, 'projectId', ${legacyProjectId}::text,
+            'batchId', ${legacyBatchId}::text, 'jobId', ${legacyJobId}::text,
+            'attemptId', ${legacyAttemptId}::text, 'capability', 'image',
+            'channelId', ${legacyChannelId}::text
+          )
+        )
+      `;
+    });
+  } finally {
+    await stagingAdmin.end();
+  }
+  const capacityMigrations = await migrateDatabase(migrationUrl);
+  assert.deepEqual(capacityMigrations, [
+    "drizzle/0011_volatile_butterfly.sql",
+    "drizzle/0012_demonic_captain_flint.sql",
+    "custom/0013_capacity_runtime.sql",
+    "custom/0014_versioned_outbox_claim.sql",
   ]);
   assert.deepEqual(await migrateDatabase(migrationUrl), []);
 
@@ -65,6 +138,38 @@ test("real PostgreSQL enforces migrations, runtime roles, RLS, and LISTEN/NOTIFY
   const projectB = "00000000-0000-4000-8000-00000000b201";
 
   try {
+    const legacyCapacity = await admin<{
+      policy_version: number;
+      workspace_concurrency: number;
+      workspace_rate: number;
+      channel_concurrency: number;
+      channel_rate: number;
+      payload_capacity: Record<string, number>;
+    }[]>`
+      select attempt.capacity_policy_version as policy_version,
+             attempt.workspace_concurrency_limit as workspace_concurrency,
+             attempt.workspace_rate_limit_per_minute as workspace_rate,
+             attempt.channel_concurrency_limit as channel_concurrency,
+             attempt.channel_rate_limit_per_minute as channel_rate,
+             outbox.payload->'capacity' as payload_capacity
+      from generation_attempts attempt
+      join outbox_events outbox on outbox.id = ${legacyOutboxId}
+      where attempt.id = ${legacyAttemptId}
+    `;
+    assert.deepEqual(legacyCapacity[0], {
+      policy_version: 1,
+      workspace_concurrency: 3,
+      workspace_rate: 30,
+      channel_concurrency: 4,
+      channel_rate: 60,
+      payload_capacity: {
+        policyVersion: 1,
+        workspaceConcurrencyLimit: 3,
+        workspaceRateLimitPerMinute: 30,
+        channelConcurrencyLimit: 4,
+        channelRateLimitPerMinute: 60,
+      },
+    });
     const ownership = await admin<{
       owner: string;
       superuser: boolean;
@@ -72,12 +177,18 @@ test("real PostgreSQL enforces migrations, runtime roles, RLS, and LISTEN/NOTIFY
       profiles_force: boolean;
       members_force: boolean;
       projects_force: boolean;
+      policies_force: boolean;
+      leases_force: boolean;
+      rate_windows_force: boolean;
     }[]>`
       select owner.rolname as owner, owner.rolsuper as superuser,
              owner.rolbypassrls as bypass_rls,
              (select relforcerowsecurity from pg_class where oid = 'profiles'::regclass) as profiles_force,
              (select relforcerowsecurity from pg_class where oid = 'workspace_members'::regclass) as members_force,
-             (select relforcerowsecurity from pg_class where oid = 'projects'::regclass) as projects_force
+             (select relforcerowsecurity from pg_class where oid = 'projects'::regclass) as projects_force,
+             (select relforcerowsecurity from pg_class where oid = 'provider_channel_capacity_policies'::regclass) as policies_force,
+             (select relforcerowsecurity from pg_class where oid = 'provider_channel_capacity_leases'::regclass) as leases_force,
+             (select relforcerowsecurity from pg_class where oid = 'generation_capacity_rate_windows'::regclass) as rate_windows_force
       from pg_proc function
       join pg_roles owner on owner.oid = function.proowner
       where function.oid = 'app.has_workspace_access(uuid,workspace_role[])'::regprocedure
@@ -89,6 +200,9 @@ test("real PostgreSQL enforces migrations, runtime roles, RLS, and LISTEN/NOTIFY
       profiles_force: false,
       members_force: false,
       projects_force: true,
+      policies_force: true,
+      leases_force: true,
+      rate_windows_force: true,
     });
     const claimPrivilege = await admin<{ allowed: boolean }[]>`
       select has_function_privilege(
@@ -111,6 +225,10 @@ test("real PostgreSQL enforces migrations, runtime roles, RLS, and LISTEN/NOTIFY
       can_update_migrations: boolean;
       api_can_update_future_table: boolean;
       worker_can_update_future_table: boolean;
+      recovery_can_select_capacity: boolean;
+      recovery_can_update_capacity: boolean;
+      api_can_update_capacity: boolean;
+      worker_can_update_capacity: boolean;
     }[]>`
       select
         has_function_privilege(
@@ -128,7 +246,20 @@ test("real PostgreSQL enforces migrations, runtime roles, RLS, and LISTEN/NOTIFY
         has_table_privilege('infinite_canvas_recovery_test', 'app_schema_migrations', 'SELECT') as can_select_migrations,
         has_table_privilege('infinite_canvas_recovery_test', 'app_schema_migrations', 'UPDATE') as can_update_migrations,
         has_table_privilege('infinite_canvas_api_test', 'platform_idempotency_requests', 'UPDATE') as api_can_update_future_table,
-        has_table_privilege('infinite_canvas_worker_test', 'platform_idempotency_requests', 'UPDATE') as worker_can_update_future_table
+        has_table_privilege('infinite_canvas_worker_test', 'platform_idempotency_requests', 'UPDATE') as worker_can_update_future_table,
+        has_table_privilege('infinite_canvas_recovery_test', 'provider_channel_capacity_leases', 'SELECT')
+          and has_table_privilege('infinite_canvas_recovery_test', 'provider_channel_capacity_policies', 'SELECT')
+          and has_table_privilege('infinite_canvas_recovery_test', 'generation_capacity_rate_windows', 'SELECT')
+          as recovery_can_select_capacity,
+        has_table_privilege('infinite_canvas_recovery_test', 'provider_channel_capacity_leases', 'UPDATE')
+          or has_table_privilege('infinite_canvas_recovery_test', 'provider_channel_capacity_policies', 'UPDATE')
+          or has_table_privilege('infinite_canvas_recovery_test', 'generation_capacity_rate_windows', 'UPDATE')
+          as recovery_can_update_capacity,
+        has_table_privilege('infinite_canvas_api_test', 'provider_channel_capacity_policies', 'UPDATE')
+          as api_can_update_capacity,
+        has_table_privilege('infinite_canvas_worker_test', 'provider_channel_capacity_leases', 'UPDATE')
+          and has_table_privilege('infinite_canvas_worker_test', 'generation_capacity_rate_windows', 'UPDATE')
+          as worker_can_update_capacity
     `;
     assert.deepEqual(recoveryPrivileges[0], {
       claim: false,
@@ -143,6 +274,10 @@ test("real PostgreSQL enforces migrations, runtime roles, RLS, and LISTEN/NOTIFY
       can_update_migrations: false,
       api_can_update_future_table: true,
       worker_can_update_future_table: true,
+      recovery_can_select_capacity: true,
+      recovery_can_update_capacity: false,
+      api_can_update_capacity: true,
+      worker_can_update_capacity: true,
     });
     const recoveryIdentity = await assertRuntimeDatabaseRole(recovery, "Integration recovery audit");
     assert.equal(recoveryIdentity.role, "infinite_canvas_recovery_test");
@@ -213,6 +348,11 @@ test("real PostgreSQL enforces migrations, runtime roles, RLS, and LISTEN/NOTIFY
         insert into model_configs (id, channel_id, model, capability, adapter_type, adapter_version, config_version, limits_json, concurrency_limit)
         values (${modelId}, ${channelId}, 'rls-image', 'image', 'openai', 1, 1, '{}'::jsonb, 1)
       `;
+      await transaction`
+        insert into provider_channel_capacity_policies (
+          channel_id, capability, version, concurrency_limit, rate_limit_per_minute
+        ) values (${channelId}, 'image', 1, 1, 60)
+      `;
       const requests = [randomUUID(), randomUUID()];
       await transaction`
         insert into idempotency_requests (id, workspace_id, operation, key, request_hash, expires_at)
@@ -237,10 +377,12 @@ test("real PostgreSQL enforces migrations, runtime roles, RLS, and LISTEN/NOTIFY
       await transaction`
         insert into generation_attempts (
           id, workspace_id, job_id, attempt_no, channel_id, credential_version,
-          adapter_type, adapter_version, request_fingerprint, business_deadline_at
+          adapter_type, adapter_version, request_fingerprint, business_deadline_at,
+          capacity_policy_version, workspace_concurrency_limit, workspace_rate_limit_per_minute,
+          channel_concurrency_limit, channel_rate_limit_per_minute
         ) values
-          (${attemptA}, ${workspaceA}, ${jobA}, 1, ${channelId}, 1, 'openai', 1, ${"e".repeat(64)}, now() + interval '1 hour'),
-          (${attemptB}, ${workspaceB}, ${jobB}, 1, ${channelId}, 1, 'openai', 1, ${"f".repeat(64)}, now() + interval '1 hour')
+          (${attemptA}, ${workspaceA}, ${jobA}, 1, ${channelId}, 1, 'openai', 1, ${"e".repeat(64)}, now() + interval '1 hour', 1, 3, 30, 1, 60),
+          (${attemptB}, ${workspaceB}, ${jobB}, 1, ${channelId}, 1, 'openai', 1, ${"f".repeat(64)}, now() + interval '1 hour', 1, 3, 30, 1, 60)
       `;
       await transaction`
         update generation_jobs set current_attempt_id = case id when ${jobA} then ${attemptA}::uuid else ${attemptB}::uuid end

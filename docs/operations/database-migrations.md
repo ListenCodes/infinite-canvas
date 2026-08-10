@@ -44,6 +44,29 @@ SECURITY DEFINER authorization helpers are owned by the non-BYPASS object owner.
 Runtime startup rejects table owners and `BYPASSRLS` logins; every other business
 table is forced through RLS.
 
+Capacity migrations are an explicit staged-upgrade case. Runtime roles may already
+exist before `provider_channel_capacity_policies`,
+`provider_channel_capacity_leases`, and `generation_capacity_rate_windows` are
+created, so object-owner default privileges must grant API/Worker write access and
+recovery-audit read-only access to future tables. The upgrade test migrates through
+the pre-capacity prefix, provisions roles, inserts a legacy attempt and Outbox row,
+then applies the remaining migrations and verifies snapshot/payload backfill and
+restored FORCE RLS. Run this path against real PostgreSQL before promotion; PGlite
+coverage is engineering evidence only.
+
+The capacity expand migration installs its insert trigger before the new snapshot
+columns become `NOT NULL`. A legacy writer that omits all five capacity fields is
+filled from the latest channel/capability policy in the same INSERT; current writers
+must supply a complete snapshot that matches the referenced policy. Partial or
+mismatched snapshots fail closed. This trigger is the rolling-compatibility bridge,
+not permission to keep legacy API writers indefinitely.
+
+`custom/0014_versioned_outbox_claim.sql` preserves the legacy two-argument
+`app.claim_outbox` signature but restricts its generation rows to workflow contract
+1. Current Workers call the three-argument overload with contract 2. Apply this
+expand migration before running old and new dispatchers together; it prevents
+either revision from consuming the other's generation payload during drain.
+
 ## Rollback policy
 
 `npm run db:rollback` is destructive and is only suitable for disposable initial

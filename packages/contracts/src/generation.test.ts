@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { activeJobsSnapshotSchema, createGenerationBatchRequestSchema } from "./generation.js";
+import { generationWorkflowInputSchema, generationWorkflowV1InputSchema } from "./workflow.js";
 
 const id = "01988a21-3f0e-7b72-b59f-c5b78351fa80";
 
@@ -51,4 +52,43 @@ test("active job snapshots carry authoritative node and slot targets", () => {
   const missingTarget = structuredClone(base) as { jobs: Record<string, unknown>[] };
   delete missingTarget.jobs[0]!.targetNodeId;
   assert.equal(activeJobsSnapshotSchema.safeParse(missingTarget).success, false);
+});
+
+test("generation workflows freeze the design workspace concurrency per capability", () => {
+  const base = {
+    schemaVersion: 2,
+    workflowName: "media-generation-v2",
+    workspaceId: id,
+    projectId: id,
+    batchId: id,
+    jobId: id,
+    attemptId: id,
+    channelId: id,
+    capacity: {
+      policyVersion: 1,
+      workspaceConcurrencyLimit: 3,
+      workspaceRateLimitPerMinute: 30,
+      channelConcurrencyLimit: 4,
+      channelRateLimitPerMinute: 60,
+    },
+  };
+  assert.equal(generationWorkflowInputSchema.safeParse({ ...base, capability: "image" }).success, true);
+  assert.equal(generationWorkflowInputSchema.safeParse({ ...base, capability: "video" }).success, false);
+  assert.equal(generationWorkflowInputSchema.safeParse({
+    ...base,
+    capability: "video",
+    capacity: { ...base.capacity, workspaceConcurrencyLimit: 2 },
+  }).success, true);
+  assert.equal(generationWorkflowV1InputSchema.safeParse({
+    ...base,
+    schemaVersion: 1,
+    workflowName: "media-generation-v1",
+    capability: "image",
+    capacity: undefined,
+  }).success, true);
+  assert.equal(generationWorkflowInputSchema.safeParse({
+    ...base,
+    capacity: undefined,
+    capability: "image",
+  }).success, false);
 });

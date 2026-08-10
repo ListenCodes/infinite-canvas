@@ -15,6 +15,7 @@ const configSchema = z.object({
   STORAGE_BUCKET: z.string().min(1).default("infinite-canvas-assets"),
   CORS_ALLOWED_ORIGINS: z.string().min(1),
   TRUST_PROXY: z.enum(["true", "false"]).default("false"),
+  GENERATION_WRITES_ENABLED: z.enum(["true", "false"]).default("true"),
   MAX_UPLOAD_BYTES: z.coerce.number().int().positive().default(100 * 1024 * 1024),
   MAX_IMPORT_BYTES: z.coerce.number().int().positive().max(50 * 1024 * 1024).default(25 * 1024 * 1024),
   MAX_CONCURRENT_IMPORTS: z.coerce.number().int().min(1).max(8).default(2),

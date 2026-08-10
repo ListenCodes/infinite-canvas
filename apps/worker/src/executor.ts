@@ -40,12 +40,19 @@ type ExecutionRepository = Pick<
   | "markUnknown"
   | "fail"
   | "isCancelRequested"
+  | "beginCancelAttempt"
+  | "markCancelAttempted"
   | "confirmCanceled"
   | "complete"
   | "convergeFailure"
 >;
 
 type AssetStorage = Pick<ObjectStorage, "materialize" | "recoverMaterialized">;
+
+interface ExecutionCapacity {
+  acquireLease(): Promise<"acquired" | "busy" | "expired" | "terminal">;
+  consumeProviderRequest(): Promise<"acquired" | "busy" | "terminal">;
+}
 
 function evidenceMediaUrl(execution: AttemptExecution): URL | undefined {
   const values = execution.evidence?.mediaUrls;
@@ -95,11 +102,33 @@ export class GenerationExecutor {
   async execute(
     input: GenerationWorkflowInput,
     context: ExecutionContext,
+    capacity?: ExecutionCapacity,
   ): Promise<ExecutionResult> {
     const executorClaimId = context.workflowRunId;
     const claim = await this.repository.claim(input, executorClaimId, context.dispatchToken);
     if (claim === "duplicate") return { outcome: "duplicate" };
     if (claim === "terminal") return { outcome: "terminal" };
+    if (capacity) {
+      const permit = await capacity.acquireLease();
+      if (permit === "terminal") return { outcome: "terminal" };
+      if (permit === "expired") {
+        await this.repository.fail(
+          input,
+          "business_deadline_exceeded",
+          "Generation deadline expired before provider submission",
+          executorClaimId,
+        );
+        return { outcome: "failed" };
+      }
+      if (permit === "busy") return { outcome: "pending", nextPollDelayMs: 3_000 };
+    }
+    const consumeProviderRequest = async (): Promise<ExecutionResult | undefined> => {
+      if (!capacity) return undefined;
+      const permit = await capacity.consumeProviderRequest();
+      if (permit === "terminal") return { outcome: "terminal" };
+      if (permit === "busy") return { outcome: "pending", nextPollDelayMs: 3_000 };
+      return undefined;
+    };
 
     let execution: AttemptExecution;
     try {
@@ -135,6 +164,7 @@ export class GenerationExecutor {
     };
     let materializedAsset = evidenceMaterializedAsset(execution);
     let shouldSubmit = false;
+    let providerRateConsumed = false;
     if (execution.status === "submitting") {
       materializedAsset ??= await this.storage.recoverMaterialized(identity);
       if (materializedAsset) {
@@ -149,6 +179,14 @@ export class GenerationExecutor {
           executorClaimId,
         );
         return { outcome: "succeeded", assetId };
+      }
+      if (execution.businessDeadlineAt.getTime() <= Date.now()) {
+        await this.repository.markUnknown(
+          input,
+          "Generation deadline expired after provider submission began without a confirmed response",
+          executorClaimId,
+        );
+        return { outcome: "outcome_unknown" };
       }
       if (!execution.providerIdempotencySupported) {
         await this.repository.markUnknown(
@@ -192,6 +230,9 @@ export class GenerationExecutor {
         await this.repository.confirmCanceled(input, executorClaimId);
         return { outcome: "terminal" };
       }
+      const rateWait = await consumeProviderRequest();
+      if (rateWait) return rateWait;
+      providerRateConsumed = true;
       if (!(await this.repository.markSubmitting(input, executorClaimId)))
         return { outcome: "terminal" };
       if (await this.repository.isCancelRequested(input, executorClaimId)) {
@@ -201,6 +242,10 @@ export class GenerationExecutor {
       shouldSubmit = true;
     }
     if (shouldSubmit) {
+      if (!providerRateConsumed) {
+        const rateWait = await consumeProviderRequest();
+        if (rateWait) return rateWait;
+      }
       const result = await this.submit(execution);
       if (result.outcome === "rejected") {
         if (result.retryable && result.acceptance === "not_accepted") {
@@ -234,11 +279,7 @@ export class GenerationExecutor {
           result.providerTaskId,
           executorClaimId,
         );
-        execution = await this.repository.load(
-          input,
-          context.signal,
-          executorClaimId,
-        );
+        return { outcome: "pending", nextPollDelayMs: result.nextPollDelayMs };
       } else {
         mediaUrl = result.mediaUrls[0]
           ? new URL(result.mediaUrls[0])
@@ -267,19 +308,44 @@ export class GenerationExecutor {
         throw new NonRetryableExecutionError("Provider task cannot be resumed");
       }
       for (;;) {
+        const cancelAttempted = Boolean(execution.evidence?.providerCancel);
         if (
           (await this.repository.isCancelRequested(input, executorClaimId)) &&
-          execution.adapter.cancel
+          execution.adapter.cancel &&
+          !cancelAttempted
         ) {
-          const cancellation = await execution.adapter.cancel(
-            execution.providerTaskId,
-            execution.provider,
-          );
+          const rateWait = await consumeProviderRequest();
+          if (rateWait) return rateWait;
+          if (!(await this.repository.beginCancelAttempt(input, executorClaimId))) {
+            return { outcome: "pending", nextPollDelayMs: 3_000 };
+          }
+          let cancellation: "canceled" | "not_supported" | "unknown";
+          try {
+            cancellation = await execution.adapter.cancel(
+              execution.providerTaskId,
+              execution.provider,
+            );
+          } catch {
+            await this.repository.markCancelAttempted(
+              input,
+              "unknown",
+              executorClaimId,
+            );
+            return { outcome: "pending", nextPollDelayMs: 3_000 };
+          }
           if (cancellation === "canceled") {
             await this.repository.confirmCanceled(input, executorClaimId);
             return { outcome: "terminal" };
           }
+          await this.repository.markCancelAttempted(
+            input,
+            cancellation,
+            executorClaimId,
+          );
+          return { outcome: "pending", nextPollDelayMs: 3_000 };
         }
+        const rateWait = await consumeProviderRequest();
+        if (rateWait) return rateWait;
         const state = await execution.adapter.poll(
           execution.providerTaskId,
           execution.provider,

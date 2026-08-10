@@ -12,6 +12,12 @@ export interface UnknownRow {
   provider_task_id: string | null;
   channel_id: string;
   capability: "image" | "video";
+  capacity_policy_version: number;
+  workspace_concurrency_limit: number;
+  workspace_rate_limit_per_minute: number;
+  channel_concurrency_limit: number;
+  channel_rate_limit_per_minute: number;
+  executor_dispatch_token: string;
 }
 
 export class UnknownOutcomeReconciler {
@@ -44,7 +50,10 @@ export class UnknownOutcomeReconciler {
       return transaction<UnknownRow[]>`
         select attempt.id as attempt_id, attempt.workspace_id, attempt.job_id,
                job.batch_id, batch.project_id, attempt.release_after, attempt.provider_task_id,
-               attempt.channel_id, job.capability
+               attempt.channel_id, job.capability, attempt.capacity_policy_version,
+               attempt.workspace_concurrency_limit, attempt.workspace_rate_limit_per_minute,
+               attempt.channel_concurrency_limit, attempt.channel_rate_limit_per_minute,
+               attempt.executor_dispatch_token::text as executor_dispatch_token
         from generation_attempts attempt
         join generation_jobs job on job.workspace_id = attempt.workspace_id and job.id = attempt.job_id
         join generation_batches batch on batch.workspace_id = job.workspace_id and batch.id = job.batch_id

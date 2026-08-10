@@ -203,6 +203,7 @@ export class AdminService {
     private readonly masterKeyBase64: string,
     private readonly largeDebitThreshold: bigint,
     private readonly createId: IdFactory,
+    private readonly generationWritesEnabled = true,
   ) {}
 
   async assertAdmin(userId: string): Promise<void> {
@@ -460,12 +461,29 @@ export class AdminService {
       return transaction`
         select channel.id, channel.name, channel.type, channel.base_url, channel.capabilities,
                channel.status, channel.health_status,
-               credential.version as credential_version, credential.secret_suffix
+               credential.version as credential_version, credential.secret_suffix,
+               coalesce(capacity.policies, '[]'::jsonb) as capacity_policies
         from provider_channels channel
         left join lateral (
           select version, secret_suffix from provider_credentials
           where channel_id = channel.id order by version desc limit 1
         ) credential on true
+        left join lateral (
+          select jsonb_agg(jsonb_build_object(
+            'capability', policy.capability,
+            'version', policy.version,
+            'concurrencyLimit', policy.concurrency_limit,
+            'rateLimitPerMinute', policy.rate_limit_per_minute
+          ) order by policy.capability) as policies
+          from provider_channel_capacity_policies policy
+          where policy.channel_id = channel.id
+            and not exists (
+              select 1 from provider_channel_capacity_policies newer
+              where newer.channel_id = policy.channel_id
+                and newer.capability = policy.capability
+                and newer.version > policy.version
+            )
+        ) capacity on true
         order by channel.created_at
       `;
     });
@@ -479,6 +497,7 @@ export class AdminService {
       healthStatus: row.health_status,
       credentialVersion: row.credential_version,
       secretSuffix: row.secret_suffix,
+      capacityPolicies: Array.isArray(row.capacity_policies) ? row.capacity_policies : [],
     }));
   }
 
@@ -608,6 +627,29 @@ export class AdminService {
         from model_configs where channel_id = ${channelId} and model = ${input.model} and capability = ${input.capability}
       `;
       const configVersion = versions[0]?.version ?? 1;
+      await transaction`select pg_advisory_xact_lock(hashtextextended(${`capacity-policy:${channelId}:${input.capability}`}, 0))`;
+      const currentCapacity = await transaction<{
+        version: number; concurrency_limit: number; rate_limit_per_minute: number;
+      }[]>`
+        select version, concurrency_limit, rate_limit_per_minute
+        from provider_channel_capacity_policies
+        where channel_id = ${channelId} and capability = ${input.capability}
+        order by version desc limit 1
+      `;
+      const previousCapacity = currentCapacity[0];
+      const capacityChanged = !previousCapacity ||
+        previousCapacity.concurrency_limit !== input.concurrencyLimit ||
+        previousCapacity.rate_limit_per_minute !== input.rateLimitPerMinute;
+      const capacityVersion = capacityChanged ? (previousCapacity?.version ?? 0) + 1 : previousCapacity.version;
+      if (capacityChanged) {
+        await transaction`
+          insert into provider_channel_capacity_policies (
+            channel_id, capability, version, concurrency_limit, rate_limit_per_minute
+          ) values (
+            ${channelId}, ${input.capability}, ${capacityVersion}, ${input.concurrencyLimit}, ${input.rateLimitPerMinute}
+          )
+        `;
+      }
       const modelConfigId = this.createId();
       await transaction`
         insert into model_configs (
@@ -631,6 +673,7 @@ export class AdminService {
           ${JSON.stringify({
             channelId, model: input.model, capability: input.capability, adapterType: input.adapterType,
             adapterVersion: input.adapterVersion, configVersion, concurrencyLimit: input.concurrencyLimit,
+            rateLimitPerMinute: input.rateLimitPerMinute, capacityVersion,
             providerIdempotencySupported: input.providerIdempotencySupported, creditAmount: input.creditAmount,
           })}::jsonb,
           ${`model-config:${modelConfigId}`}
@@ -645,6 +688,16 @@ export class AdminService {
   async resolveUnknown(actorUserId: string, attemptId: string, raw: unknown, idempotencyKey: string) {
     if (!/^[A-Za-z0-9._:-]{8,128}$/.test(idempotencyKey)) throw new AppError(400, "invalid_idempotency_key", "A valid Idempotency-Key is required");
     const input = unknownResolutionSchema.parse(raw);
+    if (
+      !this.generationWritesEnabled &&
+      (input.resolution === "accepted" || input.resolution === "provider_succeeded")
+    ) {
+      throw new AppError(
+        503,
+        "generation_writes_paused",
+        "Recovery dispatch is paused for a controlled worker handoff",
+      );
+    }
     let mediaUrl: string | undefined;
     if (input.resolution === "provider_succeeded") {
       try {
@@ -659,9 +712,15 @@ export class AdminService {
       const rows = await transaction<{
         workspace_id: string; project_id: string; batch_id: string; job_id: string; attempt_no: number;
         capability: string; channel_id: string; status: string; version: number;
+        capacity_policy_version: number; workspace_concurrency_limit: number;
+        workspace_rate_limit_per_minute: number; channel_concurrency_limit: number;
+        channel_rate_limit_per_minute: number;
       }[]>`
         select attempt.workspace_id, batch.project_id, job.batch_id, job.id as job_id, attempt.attempt_no,
-               job.capability, attempt.channel_id, attempt.status, job.version
+               job.capability, attempt.channel_id, attempt.status, job.version,
+               attempt.capacity_policy_version, attempt.workspace_concurrency_limit,
+               attempt.workspace_rate_limit_per_minute, attempt.channel_concurrency_limit,
+               attempt.channel_rate_limit_per_minute
         from generation_attempts attempt
         join generation_jobs job on job.workspace_id = attempt.workspace_id and job.id = attempt.job_id
         join generation_batches batch on batch.workspace_id = job.workspace_id and batch.id = job.batch_id
@@ -732,9 +791,16 @@ export class AdminService {
             ${this.createId()}, ${current.workspace_id}, 'generation.job.requested', ${current.job_id},
             ${`generation.job.reconciled:${attemptId}:${idempotencyKey}`},
             ${JSON.stringify({
-              schemaVersion: 1, workflowName: "media-generation-v1", workspaceId: current.workspace_id,
+              schemaVersion: 2, workflowName: "media-generation-v2", workspaceId: current.workspace_id,
               projectId: current.project_id, batchId: current.batch_id, jobId: current.job_id,
               attemptId, capability: current.capability, channelId: current.channel_id,
+              capacity: {
+                policyVersion: current.capacity_policy_version,
+                workspaceConcurrencyLimit: current.workspace_concurrency_limit,
+                workspaceRateLimitPerMinute: current.workspace_rate_limit_per_minute,
+                channelConcurrencyLimit: current.channel_concurrency_limit,
+                channelRateLimitPerMinute: current.channel_rate_limit_per_minute,
+              },
             })}::jsonb
           )
         `;

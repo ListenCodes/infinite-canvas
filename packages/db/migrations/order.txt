@@ -19,3 +19,7 @@ custom/0011_executor_dispatch_fence.sql
 drizzle/0009_adorable_captain_midlands.sql
 drizzle/0010_clammy_susan_delgado.sql
 custom/0012_runtime_acl_hardening.sql
+drizzle/0011_volatile_butterfly.sql
+drizzle/0012_demonic_captain_flint.sql
+custom/0013_capacity_runtime.sql
+custom/0014_versioned_outbox_claim.sql

@@ -69,12 +69,16 @@ async function validate(manifest, mutateEnvironment = (value) => value) {
   }
 }
 
-async function validateDrainEnvironment(lines) {
+async function validateDrainEnvironment(lines, allowZeroOwners = false) {
   const directory = await mkdtemp(join(tmpdir(), "infinite-canvas-drain-environment-"));
   try {
     const environmentPath = join(directory, "drain.env");
     await writeFile(environmentPath, lines.join("\n"), "utf8");
-    return spawnSync(process.execPath, [validator, repository, "--env-file", environmentPath], { encoding: "utf8" });
+    return spawnSync(
+      process.execPath,
+      [validator, repository, ...(allowZeroOwners ? ["--allow-zero-drain-owners"] : []), "--env-file", environmentPath],
+      { encoding: "utf8" },
+    );
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -93,7 +97,7 @@ test("release manifest rejects mutable workflow attempt metadata", async () => {
   assert.match(result.stderr, /source must contain exactly/);
 });
 
-test("Cloud and OSS drain overlays preserve isolation and explicit singleton ownership", async () => {
+test("Cloud and OSS drain overlays preserve isolation and version-scoped ownership", async () => {
   for (const topology of ["cloud", "oss"]) {
     const path = resolve(repository, `infra/compose/${topology}/drain.override.yaml`);
     const parsed = parse(await readFile(path, "utf8"));
@@ -123,7 +127,7 @@ test("Cloud and OSS drain overlays preserve isolation and explicit singleton own
     "WORKER_NEW_RECONCILER_ENABLED=false",
   ]);
   assert.equal(valid.status, 0, valid.stderr);
-  const doubleOwner = await validateDrainEnvironment([
+  const doubleDispatcher = await validateDrainEnvironment([
     `WORKER_OLD_IMAGE=${image}`,
     `WORKER_NEW_IMAGE=${image}`,
     "WORKER_OLD_DISPATCHER_ENABLED=true",
@@ -131,8 +135,69 @@ test("Cloud and OSS drain overlays preserve isolation and explicit singleton own
     "WORKER_OLD_RECONCILER_ENABLED=true",
     "WORKER_NEW_RECONCILER_ENABLED=false",
   ]);
-  assert.equal(doubleOwner.status, 1);
-  assert.match(doubleOwner.stderr, /exactly one dispatcher owner/);
+  assert.equal(doubleDispatcher.status, 1);
+  assert.match(doubleDispatcher.stderr, /exactly one dispatcher owner/);
+  const noDispatcher = await validateDrainEnvironment([
+    `WORKER_OLD_IMAGE=${image}`,
+    `WORKER_NEW_IMAGE=${image}`,
+    "WORKER_OLD_DISPATCHER_ENABLED=false",
+    "WORKER_NEW_DISPATCHER_ENABLED=false",
+    "WORKER_OLD_RECONCILER_ENABLED=true",
+    "WORKER_NEW_RECONCILER_ENABLED=false",
+  ]);
+  assert.equal(noDispatcher.status, 1);
+  assert.match(noDispatcher.stderr, /exactly one dispatcher owner/);
+  const zeroHandoff = await validateDrainEnvironment([
+    `WORKER_OLD_IMAGE=${image}`,
+    `WORKER_NEW_IMAGE=${image}`,
+    "GENERATION_WRITES_ENABLED=false",
+    "WORKER_OLD_DISPATCHER_ENABLED=false",
+    "WORKER_NEW_DISPATCHER_ENABLED=false",
+    "WORKER_OLD_RECONCILER_ENABLED=false",
+    "WORKER_NEW_RECONCILER_ENABLED=false",
+  ], true);
+  assert.equal(zeroHandoff.status, 0, zeroHandoff.stderr);
+  const unsafeZeroHandoff = await validateDrainEnvironment([
+    `WORKER_OLD_IMAGE=${image}`,
+    `WORKER_NEW_IMAGE=${image}`,
+    "GENERATION_WRITES_ENABLED=true",
+    "WORKER_OLD_DISPATCHER_ENABLED=false",
+    "WORKER_NEW_DISPATCHER_ENABLED=false",
+    "WORKER_OLD_RECONCILER_ENABLED=false",
+    "WORKER_NEW_RECONCILER_ENABLED=false",
+  ], true);
+  assert.equal(unsafeZeroHandoff.status, 1);
+  assert.match(unsafeZeroHandoff.stderr, /GENERATION_WRITES_ENABLED=false/);
+  const partialZeroHandoff = await validateDrainEnvironment([
+    `WORKER_OLD_IMAGE=${image}`,
+    `WORKER_NEW_IMAGE=${image}`,
+    "GENERATION_WRITES_ENABLED=false",
+    "WORKER_OLD_DISPATCHER_ENABLED=false",
+    "WORKER_NEW_DISPATCHER_ENABLED=false",
+    "WORKER_OLD_RECONCILER_ENABLED=true",
+    "WORKER_NEW_RECONCILER_ENABLED=false",
+  ], true);
+  assert.equal(partialZeroHandoff.status, 1);
+  assert.match(partialZeroHandoff.stderr, /requires all dispatcher and reconciler flags to be false/);
+  const doubleReconciler = await validateDrainEnvironment([
+    `WORKER_OLD_IMAGE=${image}`,
+    `WORKER_NEW_IMAGE=${image}`,
+    "WORKER_OLD_DISPATCHER_ENABLED=true",
+    "WORKER_NEW_DISPATCHER_ENABLED=true",
+    "WORKER_OLD_RECONCILER_ENABLED=true",
+    "WORKER_NEW_RECONCILER_ENABLED=true",
+  ]);
+  assert.equal(doubleReconciler.status, 1);
+  assert.match(doubleReconciler.stderr, /exactly one reconciler owner/);
+});
+
+test("drain proof blocks accepted v1 runs that have not claimed their attempt", async () => {
+  const runbook = await readFile(resolve(repository, "docs/operations/upgrade-and-drain.md"), "utf8");
+  assert.match(runbook, /A `sent` Outbox row with a `created` attempt is still an\s+accepted Hatchet run waiting to claim/);
+  assert.match(
+    runbook,
+    /attempt\.status in \(\s*'created',\s*'claimed',\s*'submitting',\s*'accepted',\s*'materializing',\s*'outcome_unknown'\s*\)/,
+  );
 });
 
 test("release manifest rejects a missing target platform", async () => {

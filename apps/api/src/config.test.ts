@@ -23,6 +23,12 @@ test("production configuration requires a private metrics token", () => {
     METRICS_BEARER_TOKEN: "metrics-token-at-least-32-characters-long",
   });
   assert.equal(config.NODE_ENV, "production");
+  assert.equal(config.GENERATION_WRITES_ENABLED, "true");
+  assert.equal(loadConfig({
+    ...baseEnvironment,
+    HOST: "127.0.0.1",
+    GENERATION_WRITES_ENABLED: "false",
+  }).GENERATION_WRITES_ENABLED, "false");
 });
 
 test("non-loopback development metrics also fail closed without a token", () => {

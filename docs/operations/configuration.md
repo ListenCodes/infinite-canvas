@@ -64,6 +64,12 @@ registration and concurrency. Run exactly one enabled Outbox dispatcher and one
 unknown reconciler per environment by coordinating `OUTBOX_DISPATCHER_ENABLED` and
 `UNKNOWN_RECONCILER_ENABLED` across Worker revisions.
 
+`GENERATION_WRITES_ENABLED=false` is the server-side maintenance gate for a
+versioned Worker handoff. It rejects new batches, paid slot retries, and
+nonterminal administrator recovery dispatches with `503 generation_writes_paused`,
+while reads, cancellation, and terminal unknown resolution remain available. Keep
+it `true` outside the bounded drain procedure.
+
 ## Observability and limits
 
 `METRICS_BEARER_TOKEN` must contain at least 32 random characters whenever API

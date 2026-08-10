@@ -30,6 +30,16 @@ function encrypt(key: Buffer, nonce: Buffer, value: Buffer): string {
   ]).toString("base64");
 }
 
+function integrationCapacity(capability: "image" | "video") {
+  return {
+    policyVersion: 1,
+    workspaceConcurrencyLimit: capability === "image" ? 3 : 2,
+    workspaceRateLimitPerMinute: capability === "image" ? 30 : 10,
+    channelConcurrencyLimit: 3,
+    channelRateLimitPerMinute: 60,
+  };
+}
+
 test(
   "dispatcher outage and concurrent recovery trigger each pending attempt once",
   { skip: !adminUrl },
@@ -75,6 +85,171 @@ test(
     };
 
     try {
+      const capacityRepository = new GenerationRepository(
+        sql,
+        config,
+        new AdapterRegistry(),
+        {} as never,
+        randomUUID,
+      );
+      const capacityFixture = await sql.begin(async (transaction) => {
+        await transaction`select set_config('app.service_role', 'on', true)`;
+        const rows = await transaction<{
+          payload: unknown;
+          dispatch_token: string;
+          model_config_id: string;
+          model_snapshot: unknown;
+          price_snapshot: unknown;
+          input_snapshot: unknown;
+          estimated_credits: string;
+          credential_version: number;
+          adapter_type: string;
+          adapter_version: number;
+          provider_idempotency_supported: boolean;
+          request_fingerprint: string;
+        }[]>`
+          select outbox.payload, attempt.executor_dispatch_token::text as dispatch_token,
+                 job.model_config_id, job.model_snapshot, job.price_snapshot, job.input_snapshot,
+                 job.estimated_credits::text, attempt.credential_version, attempt.adapter_type,
+                 attempt.adapter_version, attempt.provider_idempotency_supported,
+                 attempt.request_fingerprint
+          from outbox_events outbox
+          join generation_jobs job on job.id = outbox.aggregate_id
+          join generation_attempts attempt on attempt.id = job.current_attempt_id
+          where outbox.workspace_id = ${workspaceId} and outbox.topic = 'generation.job.requested'
+            and outbox.status = 'pending' and attempt.status = 'created'
+          order by outbox.created_at limit 3
+        `;
+        assert.equal(rows.length, 3);
+        const original = rows.map((row) => ({
+          input: generationWorkflowInputSchema.parse(row.payload),
+          dispatchToken: row.dispatch_token,
+        }));
+        const template = original[0]!.input;
+        const templateRow = rows[0]!;
+        const extraJobId = randomUUID();
+        const extraAttemptId = randomUUID();
+        const extraDispatchToken = randomUUID();
+        await transaction`
+          insert into generation_jobs (
+            id, workspace_id, batch_id, slot_index, capability, model_config_id,
+            model_snapshot, price_snapshot, input_snapshot, estimated_credits
+          ) values (
+            ${extraJobId}, ${template.workspaceId}, ${template.batchId}, 99, ${template.capability},
+            ${templateRow.model_config_id}, ${JSON.stringify(templateRow.model_snapshot)}::jsonb,
+            ${JSON.stringify(templateRow.price_snapshot)}::jsonb,
+            ${JSON.stringify(templateRow.input_snapshot)}::jsonb, ${templateRow.estimated_credits}::bigint
+          )
+        `;
+        await transaction`
+          insert into generation_attempts (
+            id, workspace_id, job_id, attempt_no, channel_id, credential_version,
+            adapter_type, adapter_version, provider_idempotency_supported, request_fingerprint,
+            business_deadline_at, executor_dispatch_token, capacity_policy_version,
+            workspace_concurrency_limit, workspace_rate_limit_per_minute,
+            channel_concurrency_limit, channel_rate_limit_per_minute
+          ) values (
+            ${extraAttemptId}, ${template.workspaceId}, ${extraJobId}, 1, ${template.channelId},
+            ${templateRow.credential_version}, ${templateRow.adapter_type}, ${templateRow.adapter_version},
+            ${templateRow.provider_idempotency_supported}, ${templateRow.request_fingerprint},
+            now() + interval '30 minutes', ${extraDispatchToken},
+            ${template.capacity.policyVersion}, ${template.capacity.workspaceConcurrencyLimit},
+            ${template.capacity.workspaceRateLimitPerMinute}, ${template.capacity.channelConcurrencyLimit + 1},
+            ${template.capacity.channelRateLimitPerMinute}
+          )
+        `;
+        await transaction`update generation_jobs set current_attempt_id = ${extraAttemptId} where id = ${extraJobId}`;
+        return {
+          original,
+          extraJobId,
+          extraAttemptId,
+          extraDispatchToken,
+          extraInput: generationWorkflowInputSchema.parse({
+            ...template,
+            jobId: extraJobId,
+            attemptId: extraAttemptId,
+            capacity: {
+              ...template.capacity,
+              channelConcurrencyLimit: template.capacity.channelConcurrencyLimit + 1,
+            },
+          }),
+        };
+      });
+      const capacityClaims = capacityFixture.original.map((_, index) => `capacity-original-${index}`);
+      assert.deepEqual(
+        await Promise.all(capacityFixture.original.map(({ input, dispatchToken }, index) =>
+          capacityRepository.claim(input, capacityClaims[index]!, dispatchToken))),
+        ["claimed", "claimed", "claimed"],
+      );
+      assert.equal(
+        await capacityRepository.claim(
+          capacityFixture.extraInput,
+          "capacity-extra",
+          capacityFixture.extraDispatchToken,
+        ),
+        "claimed",
+      );
+      assert.deepEqual(
+        await Promise.all(capacityFixture.original.map(({ input, dispatchToken }, index) =>
+          capacityRepository.acquireChannelCapacity(input, dispatchToken, capacityClaims[index]!))),
+        ["acquired", "acquired", "acquired"],
+      );
+      assert.deepEqual(
+        await Promise.all(capacityFixture.original.map(({ input, dispatchToken }, index) =>
+          capacityRepository.consumeProviderRateCapacity(input, dispatchToken, capacityClaims[index]!))),
+        ["acquired", "acquired", "acquired"],
+      );
+      assert.equal(
+        await capacityRepository.acquireChannelCapacity(
+          capacityFixture.extraInput,
+          capacityFixture.extraDispatchToken,
+          "capacity-extra",
+        ),
+        "busy",
+      );
+      const capacityUsage = await sql.begin(async (transaction) => {
+        await transaction`select set_config('app.service_role', 'on', true)`;
+        return transaction<{ workspace_used: number; channel_used: number; leases: number }[]>`
+          select
+            (select used from generation_capacity_rate_windows where workspace_id = ${workspaceId}) as workspace_used,
+            (select used from generation_capacity_rate_windows where channel_id = ${capacityFixture.original[0]!.input.channelId}) as channel_used,
+            (select count(*)::int from provider_channel_capacity_leases where channel_id = ${capacityFixture.original[0]!.input.channelId}) as leases
+        `;
+      });
+      assert.deepEqual(capacityUsage[0], { workspace_used: 3, channel_used: 3, leases: 3 });
+      await Promise.all(capacityFixture.original.slice(1).map(({ input, dispatchToken }) =>
+        capacityRepository.releaseChannelCapacity(input, dispatchToken)));
+      const replacementDispatchToken = randomUUID();
+      await sql.begin(async (transaction) => {
+        await transaction`select set_config('app.service_role', 'on', true)`;
+        await transaction`
+          update generation_attempts set executor_dispatch_token = ${replacementDispatchToken}
+          where id = ${capacityFixture.original[0]!.input.attemptId}
+        `;
+      });
+      await capacityRepository.releaseChannelCapacity(
+        capacityFixture.original[0]!.input,
+        capacityFixture.original[0]!.dispatchToken,
+      );
+      const fencedLease = await sql.begin(async (transaction) => {
+        await transaction`select set_config('app.service_role', 'on', true)`;
+        return transaction<{ count: number }[]>`
+          select count(*)::int as count from provider_channel_capacity_leases
+          where holder_id = ${capacityFixture.original[0]!.input.attemptId}
+        `;
+      });
+      assert.equal(fencedLease[0]?.count, 1);
+      await capacityRepository.releaseChannelCapacity(
+        capacityFixture.original[0]!.input,
+        replacementDispatchToken,
+      );
+      await sql.begin(async (transaction) => {
+        await transaction`select set_config('app.service_role', 'on', true)`;
+        await transaction`update generation_jobs set current_attempt_id = null where id = ${capacityFixture.extraJobId}`;
+        await transaction`delete from generation_attempts where id = ${capacityFixture.extraAttemptId}`;
+        await transaction`delete from generation_jobs where id = ${capacityFixture.extraJobId}`;
+      });
+
       const before = await sql.begin(async (transaction) => {
         await transaction`select set_config('app.service_role', 'on', true)`;
         const outbox = await transaction<{ id: string }[]>`
@@ -237,8 +412,8 @@ test(
           ) values (
             ${outboxId}, ${workspaceId}, 'generation.job.requested', ${current.job_id}, ${`integration-stale:${outboxId}`},
             ${JSON.stringify({
-              schemaVersion: 1,
-              workflowName: "media-generation-v1",
+              schemaVersion: 2,
+              workflowName: "media-generation-v2",
               workspaceId,
               projectId: current.project_id,
               batchId: current.batch_id,
@@ -246,6 +421,7 @@ test(
               attemptId: current.stale_attempt_id,
               capability: current.capability,
               channelId: current.channel_id,
+              capacity: integrationCapacity(current.capability),
             })}::jsonb,
             9, now() - interval '1 second', now() - interval '31 minutes'
           )
@@ -353,8 +529,8 @@ test(
         },
       });
       const ambiguousInput = generationWorkflowInputSchema.parse({
-        schemaVersion: 1,
-        workflowName: "media-generation-v1",
+        schemaVersion: 2,
+        workflowName: "media-generation-v2",
         workspaceId,
         projectId: unknownCandidate.project_id,
         batchId: unknownCandidate.batch_id,
@@ -362,6 +538,7 @@ test(
         attemptId: unknownCandidate.attempt_id,
         capability: unknownCandidate.capability,
         channelId: unknownCandidate.channel_id,
+        capacity: integrationCapacity(unknownCandidate.capability),
       });
       const ambiguousContext = {
         workflowRunId: "integration-lost-provider-response",
@@ -387,13 +564,18 @@ test(
           reservation_status: string;
           financial_transitions: number;
           unknown_events: number;
+          capacity_leases: number;
+          lease_covers_release: boolean;
         }[]>`
           select attempt.id as attempt_id, job.id as job_id, job.batch_id,
                  attempt.release_after, attempt.outcome_unknown_at, attempt.reconcile_after,
                  attempt.status::text as attempt_status, job.status::text as job_status,
                  reservation.status::text as reservation_status,
                  (select count(*)::int from wallet_entries where reference_type = 'attempt' and reference_id = attempt.id and kind in ('settle', 'release', 'release_after_unknown_timeout')) as financial_transitions,
-                 (select count(*)::int from generation_job_events where attempt_id = attempt.id and payload->>'status' = 'outcome_unknown') as unknown_events
+                 (select count(*)::int from generation_job_events where attempt_id = attempt.id and payload->>'status' = 'outcome_unknown') as unknown_events,
+                 (select count(*)::int from provider_channel_capacity_leases where holder_id = attempt.id) as capacity_leases,
+                 (select lease.lease_expires_at >= attempt.release_after + interval '5 minutes'
+                  from provider_channel_capacity_leases lease where lease.holder_id = attempt.id) as lease_covers_release
           from generation_attempts attempt
           join generation_jobs job on job.id = attempt.job_id and job.current_attempt_id = attempt.id
           join credit_reservations reservation on reservation.attempt_id = attempt.id
@@ -406,6 +588,8 @@ test(
       assert.equal(unknown.reservation_status, "reserved");
       assert.equal(unknown.financial_transitions, 0);
       assert.equal(unknown.unknown_events, 1);
+      assert.equal(unknown.capacity_leases, 1);
+      assert.equal(unknown.lease_covers_release, true);
       assert.equal(unknown.reconcile_after.getTime() - unknown.outcome_unknown_at.getTime(), 60 * 60 * 1000);
       assert.equal(unknown.release_after.getTime() - unknown.outcome_unknown_at.getTime(), 24 * 60 * 60 * 1000);
 
@@ -527,8 +711,8 @@ test(
             and payload->>'attemptId' = ${current.attempt_id}
         `;
         const oldPayload = {
-          schemaVersion: 1,
-          workflowName: "media-generation-v1",
+          schemaVersion: 2,
+          workflowName: "media-generation-v2",
           workspaceId,
           projectId: current.project_id,
           batchId: current.batch_id,
@@ -536,6 +720,7 @@ test(
           attemptId: current.attempt_id,
           capability: current.capability,
           channelId: current.channel_id,
+          capacity: integrationCapacity(current.capability),
         };
         const oldOutbox = await transaction<{ id: string }[]>`
           insert into outbox_events (
@@ -551,8 +736,8 @@ test(
         return current;
       });
       const workflowInput = generationWorkflowInputSchema.parse({
-        schemaVersion: 1,
-        workflowName: "media-generation-v1",
+        schemaVersion: 2,
+        workflowName: "media-generation-v2",
         workspaceId,
         projectId: materializing.project_id,
         batchId: materializing.batch_id,
@@ -560,6 +745,7 @@ test(
         attemptId: materializing.attempt_id,
         capability: materializing.capability,
         channelId: materializing.channel_id,
+        capacity: integrationCapacity(materializing.capability),
       });
       const repository = new GenerationRepository(
         sql,
@@ -772,9 +958,11 @@ test(
           channel_id: string;
           credential_version: number;
           capability: "image" | "video";
+          executor_dispatch_token: string;
         }[]>`
           select attempt.id as attempt_id, job.id as job_id, job.batch_id, batch.project_id,
-                 attempt.channel_id, attempt.credential_version, job.capability
+                 attempt.channel_id, attempt.credential_version, job.capability,
+                 attempt.executor_dispatch_token::text as executor_dispatch_token
           from generation_attempts attempt
           join generation_jobs job on job.id = attempt.job_id and job.current_attempt_id = attempt.id
           join generation_batches batch on batch.id = job.batch_id
@@ -811,6 +999,14 @@ test(
       });
       let providerPolls = 0;
       let providerSubmits = 0;
+      let signalProviderPollStarted!: () => void;
+      let releaseProviderPoll!: () => void;
+      const providerPollStarted = new Promise<void>((resolve) => {
+        signalProviderPollStarted = resolve;
+      });
+      const providerPollReleased = new Promise<void>((resolve) => {
+        releaseProviderPoll = resolve;
+      });
       const reconciliationRegistry = new AdapterRegistry();
       reconciliationRegistry.register({
         type: "grok2api",
@@ -823,6 +1019,8 @@ test(
         },
         async poll() {
           providerPolls += 1;
+          signalProviderPollStarted();
+          await providerPollReleased;
           return {
             status: "succeeded",
             mediaUrls: [new URL("https://media.example/result.png")],
@@ -837,8 +1035,8 @@ test(
         randomUUID,
       );
       const knownProviderInput = generationWorkflowInputSchema.parse({
-        schemaVersion: 1,
-        workflowName: "media-generation-v1",
+        schemaVersion: 2,
+        workflowName: "media-generation-v2",
         workspaceId,
         projectId: knownProviderUnknown.project_id,
         batchId: knownProviderUnknown.batch_id,
@@ -846,12 +1044,53 @@ test(
         attemptId: knownProviderUnknown.attempt_id,
         capability: knownProviderUnknown.capability,
         channelId: knownProviderUnknown.channel_id,
+        capacity: integrationCapacity(knownProviderUnknown.capability),
       });
+      assert.equal(
+        await reconciliationRepository.acquireChannelCapacity(
+          knownProviderInput,
+          knownProviderUnknown.executor_dispatch_token,
+          "unknown-source-claim",
+        ),
+        "acquired",
+      );
+      assert.equal(
+        await reconciliationRepository.consumeProviderRateCapacity(
+          knownProviderInput,
+          knownProviderUnknown.executor_dispatch_token,
+          "unknown-source-claim",
+        ),
+        "acquired",
+      );
       await reconciliationRepository.markUnknown(
         knownProviderInput,
         "provider query was temporarily unavailable",
         "unknown-source-claim",
       );
+      const retainedUnknownLease = await sql.begin(async (transaction) => {
+        await transaction`select set_config('app.service_role', 'on', true)`;
+        await transaction`
+          update generation_attempts
+          set executor_claim_id = 'unknown-reconcile:crashed', updated_at = now() - interval '6 minutes'
+          where id = ${knownProviderUnknown.attempt_id}
+        `;
+        return transaction<{ leases: number; covers_release: boolean; rate_used: number }[]>`
+          select
+            (select count(*)::int from provider_channel_capacity_leases
+             where holder_id = ${knownProviderUnknown.attempt_id}) as leases,
+            (select lease.lease_expires_at >= attempt.release_after
+             from provider_channel_capacity_leases lease
+             join generation_attempts attempt on attempt.id = lease.holder_id
+             where attempt.id = ${knownProviderUnknown.attempt_id}) as covers_release,
+            (select used from generation_capacity_rate_windows
+             where workspace_id = ${workspaceId} and channel_id is null
+               and capability = ${knownProviderUnknown.capability}
+               and window_started_at = date_trunc('minute', now())) as rate_used
+        `;
+      });
+      assert.equal(retainedUnknownLease[0]?.leases, 1);
+      assert.equal(retainedUnknownLease[0]?.covers_release, true);
+      const rateBeforeReconcile = retainedUnknownLease[0]!.rate_used;
       const providerReconciler = new UnknownOutcomeReconciler(
         sql,
         randomUUID,
@@ -862,12 +1101,12 @@ test(
             now,
           ),
       );
-      assert.equal(
-        await providerReconciler.reconcileOnce(
-          new Date(Date.now() + 60 * 60 * 1000 + 1_000),
-        ),
-        1,
-      );
+      const reconcileAt = new Date(Date.now() + 60 * 60 * 1000 + 1_000);
+      const firstReconcile = providerReconciler.reconcileOnce(reconcileAt);
+      await providerPollStarted;
+      assert.equal(await providerReconciler.reconcileOnce(reconcileAt), 1);
+      releaseProviderPoll();
+      assert.equal(await firstReconcile, 1);
       assert.equal(providerPolls, 1);
       assert.equal(providerSubmits, 0);
       const recoveredProviderTask = await sql.begin(async (transaction) => {
@@ -878,13 +1117,21 @@ test(
           job_status: string;
           reservation_status: string;
           recovery_outbox: number;
+          capacity_leases: number;
+          rate_used: number;
         }[]>`
           select
             (select status::text from generation_attempts where id = ${knownProviderUnknown.attempt_id}) as attempt_status,
             (select executor_dispatch_token::text from generation_attempts where id = ${knownProviderUnknown.attempt_id}) as dispatch_token,
             (select status::text from generation_jobs where id = ${knownProviderUnknown.job_id}) as job_status,
             (select status::text from credit_reservations where attempt_id = ${knownProviderUnknown.attempt_id}) as reservation_status,
-            (select count(*)::int from outbox_events where dedupe_key = ${`generation.job.unknown-recovered:${knownProviderUnknown.attempt_id}`} and status = 'pending') as recovery_outbox
+            (select count(*)::int from outbox_events where dedupe_key = ${`generation.job.unknown-recovered:${knownProviderUnknown.attempt_id}`} and status = 'pending') as recovery_outbox,
+            (select count(*)::int from provider_channel_capacity_leases
+             where holder_id = ${knownProviderUnknown.attempt_id}) as capacity_leases,
+            (select used from generation_capacity_rate_windows
+             where workspace_id = ${workspaceId} and channel_id is null
+               and capability = ${knownProviderUnknown.capability}
+               and window_started_at = date_trunc('minute', now())) as rate_used
         `;
       });
       const { dispatch_token: recoveryDispatchToken, ...recoveredState } =
@@ -895,6 +1142,8 @@ test(
         job_status: "materializing",
         reservation_status: "reserved",
         recovery_outbox: 1,
+        capacity_leases: 1,
+        rate_used: rateBeforeReconcile + 1,
       });
 
       let recoveryMaterializations = 0;

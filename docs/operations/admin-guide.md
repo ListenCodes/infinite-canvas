@@ -25,8 +25,20 @@ the final remaining administrator.
 - A model freezes channel, adapter type/version, capability, limits, concurrency,
   price, and provider-idempotency support into each attempt. Mark idempotency support
   true only when the provider contract is verified for the exact endpoint.
+- Model creation also sets the channel/capability concurrency and requests-per-minute
+  policy. Use verified provider terms and Staging load evidence. A changed limit
+  appends a policy version; it does not rewrite attempts already in flight.
+- The defaults are operational starting values. If a provider returns explicit
+  rate-limit headers or contract limits, preserve the evidence in the change record
+  and reduce the configured values before increasing Worker replicas.
 - Disable unhealthy channels for new attempts; never move an existing attempt to a
   different channel or credential version.
+
+When investigating capacity, correlate Hatchet workspace scheduling with
+`provider_channel_capacity_leases` and `generation_capacity_rate_windows`. Do not
+manually delete a live lease to make a task run. Pause new channel work instead;
+accepted work and authoritative unknown reconciliation must continue under the same
+provider limits.
 
 ## Unknown outcomes
 

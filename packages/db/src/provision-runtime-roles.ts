@@ -20,6 +20,7 @@ const businessTables = [
   "wallet_entries", "idempotency_requests", "platform_idempotency_requests", "generation_batches", "generation_jobs", "generation_attempts",
   "generation_job_targets", "credit_reservations", "generation_job_events", "outbox_events", "imports",
   "platform_risk_entries", "audit_logs", "import_source_mappings",
+  "provider_channel_capacity_policies", "provider_channel_capacity_leases", "generation_capacity_rate_windows",
 ] as const;
 const businessTableNames = new Set<string>(businessTables);
 

@@ -134,6 +134,7 @@ services:
       STORAGE_BUCKET: ${S3_BUCKET:?required}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:?required}
       TRUST_PROXY: "true"
+      GENERATION_WRITES_ENABLED: ${GENERATION_WRITES_ENABLED:-true}
     read_only: true
     tmpfs: ["/tmp:rw,noexec,nosuid,size=1g"]
     cap_drop: ["ALL"]

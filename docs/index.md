@@ -23,6 +23,7 @@
 - [Local Data Export v1](implementation/local-data-export-v1.md)
 - [Generation Error Catalog](implementation/error-catalog.md)
 - [Capacity and Environment Baseline](implementation/capacity-and-environments.md)
+- [ADR 0003: Generation Capacity Control](adr/0003-generation-capacity-control.md)
 
 ## Cloud Operations
 

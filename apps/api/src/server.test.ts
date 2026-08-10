@@ -33,6 +33,7 @@ const config: ApiConfig = {
   STORAGE_BUCKET: "test",
   CORS_ALLOWED_ORIGINS: "http://localhost:5173",
   TRUST_PROXY: "false",
+  GENERATION_WRITES_ENABLED: "true",
   MAX_UPLOAD_BYTES: 1024,
   MAX_IMPORT_BYTES: 1024,
   MAX_CONCURRENT_IMPORTS: 1,

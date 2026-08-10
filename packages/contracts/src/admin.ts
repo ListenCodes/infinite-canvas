@@ -84,6 +84,12 @@ export const providerChannelSchema = z.object({
   healthStatus: z.string(),
   credentialVersion: z.number().int().positive().nullable(),
   secretSuffix: z.string().max(32).nullable(),
+  capacityPolicies: z.array(z.object({
+    capability: generationCapabilitySchema,
+    version: z.number().int().positive(),
+    concurrencyLimit: z.number().int().positive(),
+    rateLimitPerMinute: z.number().int().positive(),
+  })),
 });
 
 export const providerChannelMutationResponseSchema = z.object({ id: z.uuid() });
@@ -101,6 +107,7 @@ export const adminModelConfigInputSchema = z.object({
   adapterVersion: z.number().int().positive().default(1),
   limits: z.record(z.string(), z.unknown()).default({}),
   concurrencyLimit: z.number().int().min(1).max(100).default(3),
+  rateLimitPerMinute: z.number().int().min(1).max(100_000).default(60),
   providerIdempotencySupported: z.boolean().default(false),
   creditAmount: decimalUnsignedSchema,
 });

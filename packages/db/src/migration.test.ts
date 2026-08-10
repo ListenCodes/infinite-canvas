@@ -24,10 +24,16 @@ const ids = {
   request: "00000000-0000-4000-8000-000000000501",
   batch: "00000000-0000-4000-8000-000000000601",
   job: "00000000-0000-4000-8000-000000000701",
+  legacyJob: "00000000-0000-4000-8000-000000000702",
   attempt: "00000000-0000-4000-8000-000000000801",
   dispatchToken: "00000000-0000-4000-8000-000000000802",
   recoveryDispatchToken: "00000000-0000-4000-8000-000000000803",
+  legacyAttempt: "00000000-0000-4000-8000-000000000804",
+  partialCapacityAttempt: "00000000-0000-4000-8000-000000000805",
   outbox: "00000000-0000-4000-8000-000000000901",
+  outboxV2: "00000000-0000-4000-8000-000000000902",
+  outboxInvalidVersion: "00000000-0000-4000-8000-000000000903",
+  outboxFutureVersion: "00000000-0000-4000-8000-000000000904",
   reservation: "00000000-0000-4000-8000-000000001001",
   reserveEntry: "00000000-0000-4000-8000-000000001101",
   settleEntry: "00000000-0000-4000-8000-000000001102",
@@ -73,6 +79,10 @@ test("initial migrations enforce tenant, execution, outbox, and wallet invariant
       "drizzle/0009_adorable_captain_midlands.sql",
       "drizzle/0010_clammy_susan_delgado.sql",
       "custom/0012_runtime_acl_hardening.sql",
+      "drizzle/0011_volatile_butterfly.sql",
+      "drizzle/0012_demonic_captain_flint.sql",
+      "custom/0013_capacity_runtime.sql",
+      "custom/0014_versioned_outbox_claim.sql",
     ]);
     await applyMigrations(db);
 
@@ -97,6 +107,9 @@ test("initial migrations enforce tenant, execution, outbox, and wallet invariant
       ) values (
         '${ids.model}', '${ids.channel}', 'test-image', 'image', 'mock', 1, 1, '{}', 3
       );
+      insert into provider_channel_capacity_policies (
+        channel_id, capability, version, concurrency_limit, rate_limit_per_minute
+      ) values ('${ids.channel}', 'image', 1, 3, 60);
       insert into idempotency_requests (
         id, workspace_id, operation, key, request_hash, expires_at
       ) values (
@@ -115,15 +128,22 @@ test("initial migrations enforce tenant, execution, outbox, and wallet invariant
       );
       insert into generation_attempts (
         id, workspace_id, job_id, attempt_no, channel_id, credential_version,
-        adapter_type, adapter_version, request_fingerprint, business_deadline_at, executor_dispatch_token
+        adapter_type, adapter_version, request_fingerprint, business_deadline_at, executor_dispatch_token,
+        capacity_policy_version, workspace_concurrency_limit, workspace_rate_limit_per_minute,
+        channel_concurrency_limit, channel_rate_limit_per_minute
       ) values (
         '${ids.attempt}', '${ids.workspaceA}', '${ids.job}', 1, '${ids.channel}', 1,
-        'mock', 1, 'fingerprint', now() + interval '5 minutes', '${ids.dispatchToken}'
+        'mock', 1, 'fingerprint', now() + interval '5 minutes', '${ids.dispatchToken}',
+        1, 3, 30, 3, 60
       );
       update generation_jobs set current_attempt_id = '${ids.attempt}' where id = '${ids.job}';
       insert into wallet_accounts (workspace_id, available) values ('${ids.workspaceA}', 100);
       insert into outbox_events (id, workspace_id, topic, aggregate_id, dedupe_key, payload)
-        values ('${ids.outbox}', '${ids.workspaceA}', 'generation.job.requested', '${ids.job}', 'attempt:${ids.attempt}', '{}');
+        values
+          ('${ids.outbox}', '${ids.workspaceA}', 'generation.job.requested', '${ids.job}', 'attempt:${ids.attempt}', '{"schemaVersion":1}'),
+          ('${ids.outboxV2}', '${ids.workspaceA}', 'generation.job.requested', '${ids.job}', 'attempt-v2:${ids.attempt}', '{"schemaVersion":2}'),
+          ('${ids.outboxInvalidVersion}', '${ids.workspaceA}', 'generation.job.requested', '${ids.job}', 'attempt-invalid:${ids.attempt}', '{"schemaVersion":0}'),
+          ('${ids.outboxFutureVersion}', '${ids.workspaceA}', 'generation.job.requested', '${ids.job}', 'attempt-future:${ids.attempt}', '{"schemaVersion":3}');
     `);
 
     await assert.rejects(
@@ -181,6 +201,22 @@ test("initial migrations enforce tenant, execution, outbox, and wallet invariant
     assert.deepEqual(outbox.rows, [{ id: ids.outbox, attempts: 1 }]);
     const secondOutboxClaim = await db.query(`select id from app.claim_outbox($1, $2)`, ["dispatcher-2", 10]);
     assert.equal(secondOutboxClaim.rows.length, 0);
+    const v2Outbox = await db.query<{ id: string; attempts: number }>(
+      `select id, attempts from app.claim_outbox($1, $2, $3)`,
+      ["dispatcher-v2", 2, 10],
+    );
+    assert.deepEqual(
+      v2Outbox.rows.sort((left, right) => left.id.localeCompare(right.id)),
+      [
+        { id: ids.outboxV2, attempts: 1 },
+        { id: ids.outboxInvalidVersion, attempts: 1 },
+      ],
+    );
+    const futureVersion = await db.query<{ status: string; attempts: number }>(
+      `select status, attempts from outbox_events where id = $1`,
+      [ids.outboxFutureVersion],
+    );
+    assert.deepEqual(futureVersion.rows, [{ status: "pending", attempts: 0 }]);
 
     await db.query(`select app.reserve_credits($1, $2, $3, $4, $5, $6, now() + interval '1 hour')`, [
       ids.reservation,
@@ -249,6 +285,65 @@ test("initial migrations enforce tenant, execution, outbox, and wallet invariant
       `),
       /immutable/i,
     );
+    await assert.rejects(
+      db.exec(`update generation_attempts set channel_concurrency_limit = 4 where id = '${ids.attempt}'`),
+      /capacity snapshot is immutable/i,
+    );
+    await assert.rejects(
+      db.exec(`
+        update provider_channel_capacity_policies set concurrency_limit = 4
+        where channel_id = '${ids.channel}' and capability = 'image' and version = 1
+      `),
+      /append-only/i,
+    );
+    await assert.rejects(
+      db.exec(`
+        insert into provider_channel_capacity_leases (channel_id, capability, holder_id, lease_expires_at)
+        values ('${ids.channel}', 'video', '${ids.attempt}', now() + interval '5 minutes')
+      `),
+      /invalid provider channel capacity lease/i,
+    );
+    await assert.rejects(
+      db.exec(`
+        insert into generation_capacity_rate_windows (workspace_id, channel_id, capability, window_started_at, used)
+        values ('${ids.workspaceA}', '${ids.channel}', 'image', date_trunc('minute', now()), 1)
+      `),
+      /generation_capacity_rate_windows_scope|check constraint/i,
+    );
+    await assert.rejects(
+      db.exec(`
+        insert into generation_capacity_rate_windows (workspace_id, channel_id, capability, window_started_at, used)
+        values ('${ids.workspaceA}', null, 'image', date_trunc('minute', now()) + interval '1 second', 1)
+      `),
+      /generation_capacity_rate_windows_minute_aligned|check constraint/i,
+    );
+    await db.exec(`
+      insert into generation_capacity_rate_windows (workspace_id, channel_id, capability, window_started_at, used)
+      values ('${ids.workspaceA}', null, 'image', date_trunc('minute', now()), 1)
+      on conflict (workspace_id, capability, window_started_at)
+        where workspace_id is not null and channel_id is null
+      do update set used = generation_capacity_rate_windows.used + 1, updated_at = now();
+      insert into generation_capacity_rate_windows (workspace_id, channel_id, capability, window_started_at, used)
+      values ('${ids.workspaceA}', null, 'image', date_trunc('minute', now()), 1)
+      on conflict (workspace_id, capability, window_started_at)
+        where workspace_id is not null and channel_id is null
+      do update set used = generation_capacity_rate_windows.used + 1, updated_at = now();
+    `);
+    const rateUsage = await db.query<{ used: number }>(`
+      select used from generation_capacity_rate_windows
+      where workspace_id = '${ids.workspaceA}' and capability = 'image'
+    `);
+    assert.equal(rateUsage.rows[0]?.used, 2);
+    await db.exec(`
+      insert into provider_channel_capacity_leases (channel_id, capability, holder_id, lease_expires_at)
+      values ('${ids.channel}', 'image', '${ids.attempt}', now() + interval '5 minutes');
+      update generation_attempts set status = 'failed', completed_at = now() where id = '${ids.attempt}';
+    `);
+    const releasedCapacity = await db.query<{ count: number }>(
+      `select count(*)::int as count from provider_channel_capacity_leases where holder_id = $1`,
+      [ids.attempt],
+    );
+    assert.equal(releasedCapacity.rows[0]?.count, 0);
 
     const down = await readFile(resolve(migrationsDir, "down", "0001_initial.sql"), "utf8");
     await db.exec(down);
@@ -308,6 +403,7 @@ test("recovery service members can read through RLS helpers but cannot execute w
     const privileges = await db.query<{
       helper: boolean;
       claim_outbox: boolean;
+      claim_outbox_v2: boolean;
       reserve: boolean;
       release: boolean;
       refresh_batch: boolean;
@@ -315,6 +411,7 @@ test("recovery service members can read through RLS helpers but cannot execute w
       select
         has_function_privilege(current_user, 'app.is_service_role()', 'EXECUTE') as helper,
         has_function_privilege(current_user, 'app.claim_outbox(text,integer)', 'EXECUTE') as claim_outbox,
+        has_function_privilege(current_user, 'app.claim_outbox(text,integer,integer)', 'EXECUTE') as claim_outbox_v2,
         has_function_privilege(current_user, 'app.reserve_credits(uuid,uuid,uuid,uuid,uuid,bigint,timestamptz)', 'EXECUTE') as reserve,
         has_function_privilege(current_user, 'app.release_reservation(uuid,uuid,text)', 'EXECUTE') as release,
         has_function_privilege(current_user, 'app.refresh_generation_batch(uuid)', 'EXECUTE') as refresh_batch
@@ -322,6 +419,7 @@ test("recovery service members can read through RLS helpers but cannot execute w
     assert.deepEqual(privileges.rows[0], {
       helper: true,
       claim_outbox: false,
+      claim_outbox_v2: false,
       reserve: false,
       release: false,
       refresh_batch: false,
@@ -386,6 +484,156 @@ test("migration ledger rejects checksum drift, unknown rows, holes, and manifest
     () => validateMigrationLedger(reordered, applied),
     /order changed|prefix changed/,
   );
+});
+
+test("capacity migrations backfill an existing release prefix and restore FORCE RLS", async () => {
+  const db = new PGlite();
+  try {
+    await applyThrough(db, "custom/0012_runtime_acl_hardening.sql");
+    await db.exec(`
+      select set_config('app.service_role', 'on', false);
+      insert into profiles (user_id, display_name) values ('${ids.userA}', 'A');
+      insert into workspaces (id, owner_user_id, name) values ('${ids.workspaceA}', '${ids.userA}', 'A');
+      insert into workspace_members (workspace_id, user_id, role) values ('${ids.workspaceA}', '${ids.userA}', 'owner');
+      insert into projects (id, workspace_id, title, document_json, updated_by)
+        values ('${ids.projectA}', '${ids.workspaceA}', 'A', '{}', '${ids.userA}');
+      insert into provider_channels (id, name, type, base_url, capabilities)
+        values ('${ids.channel}', 'legacy', 'mock', 'https://provider.example', '["image"]');
+      insert into model_configs (
+        id, channel_id, model, capability, adapter_type, adapter_version,
+        config_version, limits_json, concurrency_limit
+      ) values ('${ids.model}', '${ids.channel}', 'legacy-image', 'image', 'mock', 1, 1, '{}', 4);
+      insert into idempotency_requests (id, workspace_id, operation, key, request_hash, expires_at)
+        values ('${ids.request}', '${ids.workspaceA}', 'batch.create', 'capacity-prefix', 'hash', now() + interval '1 day');
+      insert into generation_batches (id, workspace_id, project_id, kind, requested_count, idempotency_request_id, created_by)
+        values ('${ids.batch}', '${ids.workspaceA}', '${ids.projectA}', 'image', 1, '${ids.request}', '${ids.userA}');
+      insert into generation_jobs (
+        id, workspace_id, batch_id, slot_index, capability, model_config_id,
+        model_snapshot, price_snapshot, input_snapshot, estimated_credits
+      ) values ('${ids.job}', '${ids.workspaceA}', '${ids.batch}', 0, 'image', '${ids.model}', '{}', '{}', '{}', 1);
+      insert into generation_attempts (
+        id, workspace_id, job_id, attempt_no, channel_id, credential_version,
+        adapter_type, adapter_version, request_fingerprint, business_deadline_at,
+        executor_dispatch_token
+      ) values (
+        '${ids.attempt}', '${ids.workspaceA}', '${ids.job}', 1, '${ids.channel}', 1,
+        'mock', 1, 'legacy-fingerprint', now() + interval '30 minutes', '${ids.dispatchToken}'
+      );
+      update generation_jobs set current_attempt_id = '${ids.attempt}' where id = '${ids.job}';
+      insert into outbox_events (id, workspace_id, topic, aggregate_id, dedupe_key, payload)
+      values (
+        '${ids.outbox}', '${ids.workspaceA}', 'generation.job.requested', '${ids.job}',
+        'legacy-capacity-outbox', jsonb_build_object(
+          'schemaVersion', 1, 'workflowName', 'media-generation-v1',
+          'workspaceId', '${ids.workspaceA}', 'projectId', '${ids.projectA}',
+          'batchId', '${ids.batch}', 'jobId', '${ids.job}', 'attemptId', '${ids.attempt}',
+          'capability', 'image', 'channelId', '${ids.channel}'
+        )
+      );
+    `);
+    await db.exec(`select set_config('app.service_role', 'off', false)`);
+    const migrations = await collectMigrationFiles(migrationsDir);
+    const prefixIndex = migrations.findIndex(({ name }) => name === "custom/0012_runtime_acl_hardening.sql");
+    assert.notEqual(prefixIndex, -1);
+    for (const migration of migrations.slice(prefixIndex + 1)) {
+      await db.exec(await readFile(migration.path, "utf8"));
+    }
+    await db.exec(`select set_config('app.service_role', 'on', false)`);
+    const policy = await db.query<{
+      version: number; concurrency_limit: number; rate_limit_per_minute: number;
+    }>(`
+      select version, concurrency_limit, rate_limit_per_minute
+      from provider_channel_capacity_policies
+      where channel_id = '${ids.channel}' and capability = 'image'
+    `);
+    assert.deepEqual(policy.rows, [{ version: 1, concurrency_limit: 4, rate_limit_per_minute: 60 }]);
+    await db.exec(`
+      insert into generation_jobs (
+        id, workspace_id, batch_id, slot_index, capability, model_config_id,
+        model_snapshot, price_snapshot, input_snapshot, estimated_credits
+      ) values (
+        '${ids.legacyJob}', '${ids.workspaceA}', '${ids.batch}', 1, 'image', '${ids.model}',
+        '{}', '{}', '{}', 1
+      );
+      insert into generation_attempts (
+        id, workspace_id, job_id, attempt_no, channel_id, credential_version,
+        adapter_type, adapter_version, request_fingerprint, business_deadline_at,
+        executor_dispatch_token
+      ) values (
+        '${ids.legacyAttempt}', '${ids.workspaceA}', '${ids.legacyJob}', 1, '${ids.channel}', 1,
+        'mock', 1, 'legacy-writer-after-expand', now() + interval '30 minutes', '${ids.recoveryDispatchToken}'
+      );
+    `);
+    const legacyWriterSnapshot = await db.query<{
+      capacity_policy_version: number;
+      workspace_concurrency_limit: number;
+      workspace_rate_limit_per_minute: number;
+      channel_concurrency_limit: number;
+      channel_rate_limit_per_minute: number;
+    }>(`
+      select capacity_policy_version, workspace_concurrency_limit,
+             workspace_rate_limit_per_minute, channel_concurrency_limit,
+             channel_rate_limit_per_minute
+      from generation_attempts where id = '${ids.legacyAttempt}'
+    `);
+    assert.deepEqual(legacyWriterSnapshot.rows[0], {
+      capacity_policy_version: 1,
+      workspace_concurrency_limit: 3,
+      workspace_rate_limit_per_minute: 30,
+      channel_concurrency_limit: 4,
+      channel_rate_limit_per_minute: 60,
+    });
+    await assert.rejects(
+      db.exec(`
+        insert into generation_attempts (
+          id, workspace_id, job_id, attempt_no, channel_id, credential_version,
+          adapter_type, adapter_version, request_fingerprint, business_deadline_at,
+          executor_dispatch_token, capacity_policy_version
+        ) values (
+          '${ids.partialCapacityAttempt}', '${ids.workspaceA}', '${ids.legacyJob}', 2, '${ids.channel}', 1,
+          'mock', 1, 'partial-capacity', now() + interval '30 minutes', '${ids.dispatchToken}', 1
+        )
+      `),
+      /capacity snapshot must be complete/i,
+    );
+    const snapshot = await db.query<{
+      capacity_policy_version: number;
+      workspace_concurrency_limit: number;
+      workspace_rate_limit_per_minute: number;
+      channel_concurrency_limit: number;
+      channel_rate_limit_per_minute: number;
+      payload_capacity: Record<string, number>;
+    }>(`
+      select attempt.capacity_policy_version, attempt.workspace_concurrency_limit,
+             attempt.workspace_rate_limit_per_minute, attempt.channel_concurrency_limit,
+             attempt.channel_rate_limit_per_minute, event.payload->'capacity' as payload_capacity
+      from generation_attempts attempt
+      join outbox_events event on event.payload->>'attemptId' = attempt.id::text
+      where attempt.id = '${ids.attempt}'
+    `);
+    assert.deepEqual(snapshot.rows[0], {
+      capacity_policy_version: 1,
+      workspace_concurrency_limit: 3,
+      workspace_rate_limit_per_minute: 30,
+      channel_concurrency_limit: 4,
+      channel_rate_limit_per_minute: 60,
+      payload_capacity: {
+        policyVersion: 1,
+        workspaceConcurrencyLimit: 3,
+        workspaceRateLimitPerMinute: 30,
+        channelConcurrencyLimit: 4,
+        channelRateLimitPerMinute: 60,
+      },
+    });
+    const forced = await db.query<{ count: number }>(`
+      select count(*)::int as count from pg_class
+      where relname in ('model_configs', 'generation_jobs', 'generation_attempts', 'outbox_events')
+        and relforcerowsecurity
+    `);
+    assert.equal(forced.rows[0]?.count, 4);
+  } finally {
+    await db.close();
+  }
 });
 
 test("schema evolution backfills legacy jobs and reclaims legacy verifying assets", async () => {

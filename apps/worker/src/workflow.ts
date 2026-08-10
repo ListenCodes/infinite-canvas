@@ -1,21 +1,23 @@
-import { NonRetryableError, type DurableContext, type HatchetClient, type JsonValue } from "@hatchet-dev/typescript-sdk/v1/index.js";
+import { ConcurrencyLimitStrategy, NonRetryableError, type DurableContext, type HatchetClient, type JsonValue } from "@hatchet-dev/typescript-sdk/v1/index.js";
 import { generationWorkflowInputSchema, localDataImportWorkflowInputSchema } from "@infinite-canvas/contracts";
 import { z } from "zod";
 
 import { GenerationExecutor, NonRetryableExecutionError, type ExecutionResult } from "./executor.js";
 import { ImportExecutor, InvalidImportError } from "./import-executor.js";
+import type { GenerationRepository } from "./repository.js";
 
-export const MEDIA_GENERATION_WORKFLOW_V1 = "media-generation-v1";
-export const MEDIA_GENERATION_TASK_V1 = "orchestrate-media-generation-v1";
-export const MEDIA_GENERATION_STEP_TASK_V1 = "execute-media-generation-step-v1";
-export const MEDIA_GENERATION_WORKER_V1 = "media-generation-worker-v1";
-export const MEDIA_GENERATION_FAILURE_TASK_V1 = "converge-media-generation-failure-v1";
+export const MEDIA_GENERATION_WORKFLOW_V2 = "media-generation-v2";
+export const MEDIA_GENERATION_TASK_V2 = "orchestrate-media-generation-v2";
+export const MEDIA_GENERATION_IMAGE_STEP_TASK_V2 = "execute-image-generation-step-v2";
+export const MEDIA_GENERATION_VIDEO_STEP_TASK_V2 = "execute-video-generation-step-v2";
+export const MEDIA_GENERATION_WORKER_V2 = "media-generation-worker-v2";
+export const MEDIA_GENERATION_FAILURE_TASK_V2 = "converge-media-generation-failure-v2";
 export const LOCAL_DATA_IMPORT_WORKFLOW_V1 = "local-data-import-v1";
 export const LOCAL_DATA_IMPORT_TASK_V1 = "execute-local-data-import-v1";
 
-export const dispatchedGenerationWorkflowInputSchema = generationWorkflowInputSchema.extend({ dispatchToken: z.uuid() });
+export const dispatchedGenerationWorkflowInputSchema = generationWorkflowInputSchema.safeExtend({ dispatchToken: z.uuid() });
 export type DispatchedGenerationWorkflowInput = z.infer<typeof dispatchedGenerationWorkflowInputSchema>;
-const generationStepInputSchema = dispatchedGenerationWorkflowInputSchema.extend({ executorClaimId: z.string().min(1) });
+const generationStepInputSchema = dispatchedGenerationWorkflowInputSchema.safeExtend({ executorClaimId: z.string().min(1) });
 interface GenerationStepInput extends DispatchedGenerationWorkflowInput {
   [key: string]: JsonValue;
   executorClaimId: string;
@@ -28,32 +30,65 @@ function durablePollDelay(attemptId: string, pollNumber: number, providerDelayMs
   return Math.max(providerDelayMs, Math.round(base * jitter));
 }
 
-export function createMediaGenerationWorkflow(hatchet: HatchetClient, executor: GenerationExecutor) {
-  const executionTask = hatchet.task<GenerationStepInput, ExecutionResult>({
-    name: MEDIA_GENERATION_STEP_TASK_V1,
+type CapacityCoordinator = Pick<
+  GenerationRepository,
+  "acquireChannelCapacity" | "consumeProviderRateCapacity" | "releaseChannelCapacity"
+>;
+
+export function createMediaGenerationWorkflow(
+  hatchet: HatchetClient,
+  executor: GenerationExecutor,
+  capacity: CapacityCoordinator,
+) {
+  const executionTask = (capability: "image" | "video") => hatchet.task<GenerationStepInput, ExecutionResult>({
+    name: capability === "image" ? MEDIA_GENERATION_IMAGE_STEP_TASK_V2 : MEDIA_GENERATION_VIDEO_STEP_TASK_V2,
     version: "1",
     inputValidator: generationStepInputSchema,
+    concurrency: {
+      expression: `'workspace:' + input.workspaceId + ':${capability}'`,
+      maxRuns: capability === "image" ? 3 : 2,
+      limitStrategy: ConcurrencyLimitStrategy.GROUP_ROUND_ROBIN,
+    },
+    slotCost: capability === "image" ? 1 : 2,
     retries: 3,
     backoff: { factor: 2, maxSeconds: 60 },
     executionTimeout: "5m",
     scheduleTimeout: "24h",
     fn: async (rawInput, context) => {
       const stepInput = generationStepInputSchema.parse(rawInput);
+      if (stepInput.capability !== capability) throw new NonRetryableError("Generation task capability does not match its workflow input");
       try {
-        return await executor.execute(generationWorkflowInputSchema.parse(stepInput), {
+        const result = await executor.execute(generationWorkflowInputSchema.parse(stepInput), {
           workflowRunId: stepInput.executorClaimId,
           dispatchToken: stepInput.dispatchToken,
           signal: context.abortController.signal,
+        }, {
+          acquireLease: () => capacity.acquireChannelCapacity(
+            stepInput,
+            stepInput.dispatchToken,
+            stepInput.executorClaimId,
+          ),
+          consumeProviderRequest: () => capacity.consumeProviderRateCapacity(
+            stepInput,
+            stepInput.dispatchToken,
+            stepInput.executorClaimId,
+          ),
         });
+        if (["terminal", "succeeded", "failed"].includes(result.outcome)) {
+          await capacity.releaseChannelCapacity(stepInput, stepInput.dispatchToken);
+        }
+        return result;
       } catch (error) {
         if (error instanceof NonRetryableExecutionError) throw new NonRetryableError(error.message);
         throw error;
       }
     },
   });
+  const imageExecutionTask = executionTask("image");
+  const videoExecutionTask = executionTask("video");
   const workflow = hatchet.workflow<DispatchedGenerationWorkflowInput>({
-    name: MEDIA_GENERATION_WORKFLOW_V1,
-    version: "1",
+    name: MEDIA_GENERATION_WORKFLOW_V2,
+    version: "2",
     inputValidator: dispatchedGenerationWorkflowInputSchema,
     idempotency: {
       strategy: "status",
@@ -62,7 +97,7 @@ export function createMediaGenerationWorkflow(hatchet: HatchetClient, executor: 
     },
   });
   workflow.durableTask({
-    name: MEDIA_GENERATION_TASK_V1,
+    name: MEDIA_GENERATION_TASK_V2,
     retries: 3,
     backoff: { factor: 2, maxSeconds: 60 },
     executionTimeout: "45m",
@@ -71,7 +106,8 @@ export function createMediaGenerationWorkflow(hatchet: HatchetClient, executor: 
       const input = dispatchedGenerationWorkflowInputSchema.parse(rawInput);
       let pollNumber = 0;
       for (;;) {
-        const result = await context.spawnChild(executionTask, {
+        const childTask = input.capability === "image" ? imageExecutionTask : videoExecutionTask;
+        const result = await context.spawnChild(childTask, {
           ...input,
           executorClaimId: context.workflowRunId(),
         }, {
@@ -84,7 +120,7 @@ export function createMediaGenerationWorkflow(hatchet: HatchetClient, executor: 
     },
   });
   workflow.onFailure({
-    name: MEDIA_GENERATION_FAILURE_TASK_V1,
+    name: MEDIA_GENERATION_FAILURE_TASK_V2,
     retries: 5,
     fn: async (rawInput, context) => {
       const dispatchedInput = dispatchedGenerationWorkflowInputSchema.parse(rawInput);
@@ -95,7 +131,7 @@ export function createMediaGenerationWorkflow(hatchet: HatchetClient, executor: 
       return { converged: true };
     },
   });
-  return { workflow, executionTask };
+  return { workflow, executionTasks: [imageExecutionTask, videoExecutionTask] };
 }
 
 export function createLocalDataImportWorkflow(hatchet: HatchetClient, executor: ImportExecutor) {

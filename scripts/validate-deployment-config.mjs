@@ -5,9 +5,12 @@ const argumentsList = process.argv.slice(2);
 const envFileArguments = [];
 const releaseManifestArguments = [];
 let repositoryArgument;
+let allowZeroDrainOwners = false;
 for (let index = 0; index < argumentsList.length; index += 1) {
   const value = argumentsList[index];
-  if (value === "--env-file" || value === "--release-manifest") {
+  if (value === "--allow-zero-drain-owners") {
+    allowZeroDrainOwners = true;
+  } else if (value === "--env-file" || value === "--release-manifest") {
     const target = argumentsList[index + 1];
     if (!target) throw new Error(`${value} requires a path`);
     (value === "--env-file" ? envFileArguments : releaseManifestArguments).push(target);
@@ -199,19 +202,34 @@ function validateApplicationImages(environment, source, allowPlaceholder) {
   }
 }
 
-function validateDrainEnvironment(environment, source, allowPlaceholder) {
+function validateDrainEnvironment(environment, source, allowPlaceholder, allowZeroOwners = false) {
   for (const key of ["WORKER_OLD_IMAGE", "WORKER_NEW_IMAGE"]) {
     const value = environment[key];
     if (!value) errors.push(`${source}: ${key} is required`);
     else if (!(allowPlaceholder && /@sha256:replace-me$/.test(value))) assertImmutableImage(value, `${source}: ${key}`);
   }
+  const ownerCounts = {};
   for (const subsystem of ["DISPATCHER", "RECONCILER"]) {
     const oldValue = environment[`WORKER_OLD_${subsystem}_ENABLED`];
     const newValue = environment[`WORKER_NEW_${subsystem}_ENABLED`];
     if (![oldValue, newValue].every((value) => value === "true" || value === "false")) {
       errors.push(`${source}: ${subsystem.toLowerCase()} owner flags must be explicit booleans`);
-    } else if (Number(oldValue === "true") + Number(newValue === "true") !== 1) {
-      errors.push(`${source}: exactly one ${subsystem.toLowerCase()} owner must be enabled`);
+      continue;
+    }
+    ownerCounts[subsystem] = Number(oldValue === "true") + Number(newValue === "true");
+  }
+  if (allowZeroOwners) {
+    if (ownerCounts.DISPATCHER !== 0 || ownerCounts.RECONCILER !== 0) {
+      errors.push(`${source}: zero-owner handoff requires all dispatcher and reconciler flags to be false`);
+    }
+    if (environment.GENERATION_WRITES_ENABLED !== "false") {
+      errors.push(`${source}: zero-owner handoff requires GENERATION_WRITES_ENABLED=false`);
+    }
+  } else {
+    for (const subsystem of ["DISPATCHER", "RECONCILER"]) {
+      if (ownerCounts[subsystem] !== 1) {
+        errors.push(`${source}: exactly one ${subsystem.toLowerCase()} owner must be enabled`);
+      }
     }
   }
 }
@@ -242,7 +260,7 @@ for (const relativePath of envFileArguments) {
   const path = resolve(relativePath);
   const environment = parseEnvironment(await readFile(path, "utf8"));
   if ("WORKER_OLD_IMAGE" in environment || "WORKER_NEW_IMAGE" in environment) {
-    validateDrainEnvironment(environment, path, false);
+    validateDrainEnvironment(environment, path, false, allowZeroDrainOwners);
   } else {
     validateApplicationImages(environment, path, false);
     validatedEnvironments.push(environment);

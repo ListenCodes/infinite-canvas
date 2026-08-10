@@ -53,6 +53,15 @@ interface ModelRow {
   price_conditions: Record<string, unknown>;
   credit_amount: string;
   provider_idempotency_supported: boolean;
+  capacity_policy_version: number;
+  channel_concurrency_limit: number;
+  channel_rate_limit_per_minute: number;
+}
+
+function workspaceCapacity(capability: "image" | "video") {
+  return capability === "image"
+    ? { concurrencyLimit: 3, rateLimitPerMinute: 30 }
+    : { concurrencyLimit: 2, rateLimitPerMinute: 10 };
 }
 
 interface IdempotencyRow {
@@ -246,7 +255,18 @@ export class GenerationService {
     private readonly sql: Sql,
     private readonly createId: IdFactory,
     private readonly idempotencyTtlSeconds: number,
+    private readonly generationWritesEnabled = true,
   ) {}
+
+  private assertGenerationWritesEnabled(): void {
+    if (!this.generationWritesEnabled) {
+      throw new AppError(
+        503,
+        "generation_writes_paused",
+        "New cloud generation attempts are paused for a controlled worker handoff",
+      );
+    }
+  }
 
   async listModels(userId: string, capability?: "image" | "video") {
     return this.sql.begin(async (transaction) => {
@@ -319,6 +339,7 @@ export class GenerationService {
     rawInput: unknown,
     idempotencyKey: string,
   ): Promise<CreateGenerationBatchResponse> {
+    this.assertGenerationWritesEnabled();
     if (!/^[A-Za-z0-9._:-]{8,128}$/.test(idempotencyKey)) {
       throw new AppError(
         400,
@@ -396,12 +417,21 @@ export class GenerationService {
           select config.id as model_config_id, config.channel_id, config.model,
                  config.adapter_type, config.adapter_version, config.config_version, config.limits_json,
                  config.provider_idempotency_supported,
+                 capacity.version as capacity_policy_version,
+                 capacity.concurrency_limit as channel_concurrency_limit,
+                 capacity.rate_limit_per_minute as channel_rate_limit_per_minute,
                  channel.type as channel_type, channel.base_url,
                  credential.version as credential_version,
                  price.id as price_id, price.version as price_version,
                  price.conditions_json as price_conditions, price.credit_amount::text
           from model_configs config
           join provider_channels channel on channel.id = config.channel_id and channel.status = 'active'
+          join lateral (
+            select version, concurrency_limit, rate_limit_per_minute
+            from provider_channel_capacity_policies
+            where channel_id = config.channel_id and capability = config.capability
+            order by version desc limit 1
+          ) capacity on true
           join lateral (
             select version from provider_credentials
             where channel_id = channel.id and status = 'active'
@@ -477,6 +507,13 @@ export class GenerationService {
             configVersion: model.config_version,
             limits: model.limits_json,
             providerIdempotencySupported: model.provider_idempotency_supported,
+            capacity: {
+              policyVersion: model.capacity_policy_version,
+              workspaceConcurrencyLimit: workspaceCapacity(input.kind).concurrencyLimit,
+              workspaceRateLimitPerMinute: workspaceCapacity(input.kind).rateLimitPerMinute,
+              channelConcurrencyLimit: model.channel_concurrency_limit,
+              channelRateLimitPerMinute: model.channel_rate_limit_per_minute,
+            },
           };
           const priceSnapshot = {
             priceId: model.price_id,
@@ -505,11 +542,16 @@ export class GenerationService {
           await transaction`
             insert into generation_attempts (
               id, workspace_id, job_id, attempt_no, channel_id, credential_version,
-              adapter_type, adapter_version, provider_idempotency_supported, request_fingerprint, business_deadline_at
+              adapter_type, adapter_version, provider_idempotency_supported, request_fingerprint, business_deadline_at,
+              capacity_policy_version, workspace_concurrency_limit, workspace_rate_limit_per_minute,
+              channel_concurrency_limit, channel_rate_limit_per_minute
             ) values (
               ${attemptId}, ${project.workspace_id}, ${jobId}, 1, ${model.channel_id}, ${model.credential_version},
               ${model.adapter_type}, ${model.adapter_version}, ${model.provider_idempotency_supported},
-              ${hash}, now() + interval '30 minutes'
+              ${hash}, now() + interval '30 minutes',
+              ${model.capacity_policy_version}, ${workspaceCapacity(input.kind).concurrencyLimit},
+              ${workspaceCapacity(input.kind).rateLimitPerMinute}, ${model.channel_concurrency_limit},
+              ${model.channel_rate_limit_per_minute}
             )
           `;
           await transaction`update generation_jobs set current_attempt_id = ${attemptId} where id = ${jobId}`;
@@ -529,8 +571,8 @@ export class GenerationService {
               ${this.createId()}, ${project.workspace_id}, 'generation.job.requested', ${jobId},
               ${`generation.job.requested:${attemptId}`},
               ${JSON.stringify({
-                schemaVersion: 1,
-                workflowName: "media-generation-v1",
+                schemaVersion: 2,
+                workflowName: "media-generation-v2",
                 workspaceId: project.workspace_id,
                 projectId: project.id,
                 batchId,
@@ -538,6 +580,7 @@ export class GenerationService {
                 attemptId,
                 capability: input.kind,
                 channelId: model.channel_id,
+                capacity: modelSnapshot.capacity,
               })}::jsonb
             )
           `;
@@ -826,6 +869,7 @@ export class GenerationService {
     jobId: string,
     idempotencyKey: string,
   ): Promise<GenerationJobProjection> {
+    this.assertGenerationWritesEnabled();
     if (!/^[A-Za-z0-9._:-]{8,128}$/.test(idempotencyKey)) {
       throw new AppError(
         400,
@@ -853,6 +897,9 @@ export class GenerationService {
           provider_idempotency_supported: boolean;
           capability: "image" | "video";
           attempt_no: number;
+          capacity_policy_version: number;
+          channel_concurrency_limit: number;
+          channel_rate_limit_per_minute: number;
         }[]
       >`
         select job.workspace_id, job.batch_id, batch.project_id, job.slot_index, target.slot_id,
@@ -860,7 +907,10 @@ export class GenerationService {
                job.status, job.version, job.estimated_credits::text,
                attempt.channel_id, attempt.credential_version, attempt.adapter_type,
                attempt.adapter_version, attempt.provider_idempotency_supported,
-               attempt.request_fingerprint, attempt.attempt_no
+               attempt.request_fingerprint, attempt.attempt_no,
+               capacity.version as capacity_policy_version,
+               capacity.concurrency_limit as channel_concurrency_limit,
+               capacity.rate_limit_per_minute as channel_rate_limit_per_minute
         from generation_jobs job
         join generation_batches batch on batch.workspace_id = job.workspace_id and batch.id = job.batch_id
         join generation_job_targets target on target.workspace_id = job.workspace_id and target.job_id = job.id
@@ -868,6 +918,12 @@ export class GenerationService {
         join workspace_members member on member.workspace_id = job.workspace_id
         join workspaces workspace on workspace.id = job.workspace_id and workspace.status = 'active'
         join profiles profile on profile.user_id = member.user_id and profile.status = 'active'
+        join lateral (
+          select version, concurrency_limit, rate_limit_per_minute
+          from provider_channel_capacity_policies
+          where channel_id = attempt.channel_id and capability = job.capability
+          order by version desc limit 1
+        ) capacity on true
         where job.id = ${jobId} and member.user_id = ${userId} and member.status = 'active'
           and member.role in ('owner', 'editor')
         for update of job, attempt
@@ -926,11 +982,16 @@ export class GenerationService {
       await transaction`
         insert into generation_attempts (
           id, workspace_id, job_id, attempt_no, channel_id, credential_version,
-          adapter_type, adapter_version, provider_idempotency_supported, request_fingerprint, business_deadline_at
+          adapter_type, adapter_version, provider_idempotency_supported, request_fingerprint, business_deadline_at,
+          capacity_policy_version, workspace_concurrency_limit, workspace_rate_limit_per_minute,
+          channel_concurrency_limit, channel_rate_limit_per_minute
         ) values (
           ${attemptId}, ${job.workspace_id}, ${jobId}, ${attemptNo}, ${job.channel_id}, ${job.credential_version},
           ${job.adapter_type}, ${job.adapter_version}, ${job.provider_idempotency_supported},
-          ${job.request_fingerprint}, now() + interval '30 minutes'
+          ${job.request_fingerprint}, now() + interval '30 minutes',
+          ${job.capacity_policy_version}, ${workspaceCapacity(job.capability).concurrencyLimit},
+          ${workspaceCapacity(job.capability).rateLimitPerMinute}, ${job.channel_concurrency_limit},
+          ${job.channel_rate_limit_per_minute}
         )
       `;
       await transaction`
@@ -1105,13 +1166,22 @@ export class GenerationService {
       select ${this.createId()}, ${workspaceId}, 'generation.job.requested', ${jobId},
              ${`generation.job.requested:${attemptId}`},
              jsonb_build_object(
-               'schemaVersion', 1, 'workflowName', 'media-generation-v1',
+               'schemaVersion', 2, 'workflowName', 'media-generation-v2',
                'workspaceId', ${workspaceId}::text, 'projectId', ${projectId}::text,
                'batchId', ${batchId}::text, 'jobId', ${jobId}::text,
                'attemptId', ${attemptId}::text, 'capability', job.capability,
-               'channelId', ${channelId}::text
+               'channelId', ${channelId}::text,
+               'capacity', jsonb_build_object(
+                 'policyVersion', attempt.capacity_policy_version,
+                 'workspaceConcurrencyLimit', attempt.workspace_concurrency_limit,
+                 'workspaceRateLimitPerMinute', attempt.workspace_rate_limit_per_minute,
+                 'channelConcurrencyLimit', attempt.channel_concurrency_limit,
+                 'channelRateLimitPerMinute', attempt.channel_rate_limit_per_minute
+               )
              )
-      from generation_jobs job where job.id = ${jobId}
+      from generation_jobs job
+      join generation_attempts attempt on attempt.id = ${attemptId} and attempt.job_id = job.id
+      where job.id = ${jobId}
     `;
   }
 }

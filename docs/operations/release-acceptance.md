@@ -46,9 +46,10 @@ full restore exercises. Any failed or missing row blocks production promotion.
 
 The commit containing this section has the following local evidence on 2026-08-10:
 
-- `npm test` passes 75 workspace tests. The API, Worker, and database suites each
-  expose one real-PostgreSQL integration entry, but those three entries are skipped
-  by the normal unit command when `TEST_POSTGRES_ADMIN_URL` is absent.
+- `npm test` passes 87 workspace tests and skips three environment-gated entries.
+  The API, Worker, and database suites each expose one real-PostgreSQL integration
+  entry; those three entries are skipped by the normal unit command when
+  `TEST_POSTGRES_ADMIN_URL` is absent.
 - The Web suites pass 44 tests across legacy media adapters, canvas terminal-state
   handling, cloud recovery/SSE, and local-to-cloud migration safety. The migration
   tests cover account/workspace isolation, two-phase activation, fail-closed media
@@ -56,8 +57,16 @@ The commit containing this section has the following local evidence on 2026-08-1
   assets without deleting the original local archive.
 - Root and Web type checks and production builds pass. Root and Web production
   dependency audits report zero known vulnerabilities. Deployment/recovery policy
-  tests pass 22 scenarios, and the deployment, recovery-boundary, Web bundle secret,
+  tests pass 23 scenarios, and the deployment, recovery-boundary, Web bundle secret,
   isolated-browser storage secret, and diff checks pass.
+- Capacity tests cover v1/v2 contract separation, immutable attempt snapshots,
+  old-prefix migration backfill, append-only channel policy, workspace 3/2 and
+  dynamic channel leases, provider-request-only RPM consumption, retained unknown
+  leases, stale reconciliation claim recovery, cancel evidence, and deterministic
+  terminal release. The v1/v2 runbook pauses generation writes, proves v1 drain,
+  and uses an explicitly validated zero-owner handoff before v2 starts. Multi-
+  connection PostgreSQL and real Hatchet fairness/load evidence remains an external
+  release row, not a local pass.
 - Rows 8-10 include deterministic fault injection. A fake paid adapter loses its
   response after acceptance while production Executor/Repository code persists one
   `outcome_unknown`, leaves the reservation frozen, schedules 1-hour/24-hour
@@ -84,6 +93,12 @@ The commit containing this section has the following local evidence on 2026-08-1
   read access and the four RLS identity helpers. Migration ledger entries bind both
   checksum and ordered prefix, preventing a previously applied manifest from being
   silently reordered.
+- Capacity-policy tests cover append-only policy versions, immutable attempt
+  snapshots, legacy attempt/Outbox backfill, FORCE RLS restoration, channel lease
+  validation, workspace/channel minute counters, terminal release, stale dispatch
+  fencing, and the image workspace limit of three. Normal dispatch excludes
+  `outcome_unknown`; provider-task reconciliation uses the same database capacity
+  gate. Real PostgreSQL contention and provider load evidence remain required.
 - Tag publication first persists one three-image release set in a draft GitHub
   Release, then promotes immutable tags from that set. The combined recovery evidence
   is regenerated against the exact API/Worker digests, records the manifest checksum

@@ -165,6 +165,20 @@ export const modelConfigs = pgTable("model_configs", {
   check("model_configs_concurrency_positive", sql`${table.concurrencyLimit} > 0`),
 ]);
 
+export const providerChannelCapacityPolicies = pgTable("provider_channel_capacity_policies", {
+  channelId: uuid("channel_id").notNull().references(() => providerChannels.id),
+  capability: generationCapability("capability").notNull(),
+  version: integer("version").notNull(),
+  concurrencyLimit: integer("concurrency_limit").notNull(),
+  rateLimitPerMinute: integer("rate_limit_per_minute").notNull(),
+  createdAt: utc("created_at").notNull().defaultNow(),
+  updatedAt: utc("updated_at").notNull().defaultNow(),
+}, (table) => [
+  primaryKey({ columns: [table.channelId, table.capability, table.version], name: "provider_channel_capacity_policies_pk" }),
+  check("provider_channel_capacity_policies_positive", sql`${table.version} > 0 and ${table.concurrencyLimit} > 0 and ${table.rateLimitPerMinute} > 0`),
+  index("provider_channel_capacity_policies_latest_idx").on(table.channelId, table.capability, table.version),
+]);
+
 export const modelPrices = pgTable("model_prices", {
   id: uuid("id").primaryKey(),
   modelConfigId: uuid("model_config_id").notNull().references(() => modelConfigs.id),
@@ -287,6 +301,11 @@ export const generationAttempts = pgTable("generation_attempts", {
   executorRunId: text("executor_run_id"),
   providerTaskId: text("provider_task_id"),
   providerIdempotencySupported: boolean("provider_idempotency_supported").notNull().default(false),
+  capacityPolicyVersion: integer("capacity_policy_version").notNull(),
+  workspaceConcurrencyLimit: integer("workspace_concurrency_limit").notNull(),
+  workspaceRateLimitPerMinute: integer("workspace_rate_limit_per_minute").notNull(),
+  channelConcurrencyLimit: integer("channel_concurrency_limit").notNull(),
+  channelRateLimitPerMinute: integer("channel_rate_limit_per_minute").notNull(),
   requestFingerprint: text("request_fingerprint").notNull(),
   businessDeadlineAt: utc("business_deadline_at").notNull(),
   claimedAt: utc("claimed_at"),
@@ -307,6 +326,45 @@ export const generationAttempts = pgTable("generation_attempts", {
   uniqueIndex("generation_attempts_provider_task_unique").on(table.channelId, table.providerTaskId).where(sql`${table.providerTaskId} is not null`),
   check("generation_attempts_no_positive", sql`${table.attemptNo} > 0`),
   check("generation_attempts_versions_positive", sql`${table.credentialVersion} > 0 and ${table.adapterVersion} > 0`),
+  check("generation_attempts_capacity_positive", sql`${table.capacityPolicyVersion} > 0 and ${table.workspaceConcurrencyLimit} > 0 and ${table.workspaceRateLimitPerMinute} > 0 and ${table.channelConcurrencyLimit} > 0 and ${table.channelRateLimitPerMinute} > 0`),
+]);
+
+export const providerChannelCapacityLeases = pgTable("provider_channel_capacity_leases", {
+  channelId: uuid("channel_id").notNull().references(() => providerChannels.id),
+  capability: generationCapability("capability").notNull(),
+  holderId: uuid("holder_id").notNull().references(() => generationAttempts.id),
+  acquiredAt: utc("acquired_at").notNull().defaultNow(),
+  leaseExpiresAt: utc("lease_expires_at").notNull(),
+  updatedAt: utc("updated_at").notNull().defaultNow(),
+}, (table) => [
+  primaryKey({ columns: [table.channelId, table.capability, table.holderId], name: "provider_channel_capacity_leases_pk" }),
+  unique("provider_channel_capacity_leases_holder_unique").on(table.holderId),
+  index("provider_channel_capacity_leases_expiry_idx").on(table.channelId, table.capability, table.leaseExpiresAt),
+  check("provider_channel_capacity_leases_valid_expiry", sql`${table.leaseExpiresAt} > ${table.acquiredAt}`),
+]);
+
+export const generationCapacityRateWindows = pgTable("generation_capacity_rate_windows", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  workspaceId: uuid("workspace_id").references(() => workspaces.id),
+  channelId: uuid("channel_id").references(() => providerChannels.id),
+  capability: generationCapability("capability").notNull(),
+  windowStartedAt: utc("window_started_at").notNull(),
+  used: integer("used").notNull(),
+  updatedAt: utc("updated_at").notNull().defaultNow(),
+}, (table) => [
+  uniqueIndex("generation_capacity_rate_windows_workspace_unique")
+    .on(table.workspaceId, table.capability, table.windowStartedAt)
+    .where(sql`${table.workspaceId} is not null and ${table.channelId} is null`),
+  uniqueIndex("generation_capacity_rate_windows_channel_unique")
+    .on(table.channelId, table.capability, table.windowStartedAt)
+    .where(sql`${table.channelId} is not null and ${table.workspaceId} is null`),
+  index("generation_capacity_rate_windows_expiry_idx").on(table.windowStartedAt),
+  check("generation_capacity_rate_windows_scope", sql`num_nonnulls(${table.workspaceId}, ${table.channelId}) = 1`),
+  check(
+    "generation_capacity_rate_windows_minute_aligned",
+    sql`${table.windowStartedAt} = date_bin(interval '1 minute', ${table.windowStartedAt}, timestamptz '1970-01-01 00:00:00+00')`,
+  ),
+  check("generation_capacity_rate_windows_used_positive", sql`${table.used} > 0`),
 ]);
 
 export const generationJobTargets = pgTable("generation_job_targets", {

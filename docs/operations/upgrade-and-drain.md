@@ -11,22 +11,38 @@ provider work.
    topology-specific drain env file. Keep the existing `worker` service as the
    old revision and start `worker-new` with both owner flags set to `false`.
    Both images must be immutable digest references.
-3. Wait until the new Worker is healthy and registered in Hatchet.
-4. Set the old revision's dispatcher and reconciler flags to `false`, then
-   recreate only `worker`. Confirm that both owner counts are zero. A short zero
-   owner interval is safe because Outbox rows remain durable; a double-owner
-   interval is forbidden.
-5. Set the new revision's dispatcher and reconciler flags to `true`, recreate
-   only `worker-new`, and confirm that each owner count is exactly one. Change
-   the dispatcher routing constant for newly created attempts to v2 only after
-   the new owner is healthy.
-6. Keep the old execution Worker running. Observe Hatchet runs and business
-   attempts for v1 until no v1 attempts
-   are `claimed`, `submitting`, `accepted`, or `materializing` and no v1 recovery
-   Outbox event is pending/sending.
-7. Stop the old Worker gracefully. The 50-minute Compose grace period is a ceiling,
+3. Wait until the new Worker is healthy and registered in Hatchet. The old image
+   registers `media-generation-v1`; the candidate image registers the distinct
+   `media-generation-v2` contract and its version 2 image/video tasks.
+4. Deploy the version 2 API with `GENERATION_WRITES_ENABLED=false` and verify that
+   new batch, paid retry, and nonterminal administrator recovery requests return
+   `503 generation_writes_paused`. Reads, cancellation, and terminal unknown
+   resolution remain available. Do not queue version 2 attempts during this
+   interval: their 30-minute business deadline starts when the API commits them.
+   Keep both dispatcher and reconciler ownership on the old revision.
+5. Wait until every version 1 generation Outbox row is `sent`, no old execution
+   can create another recovery row, and every version 1 attempt has left
+   `created`, `claimed`, `submitting`, `accepted`, `materializing`, and
+   `outcome_unknown`. A `sent` Outbox row with a `created` attempt is still an
+   accepted Hatchet run waiting to claim and therefore blocks the handoff.
+   Version 1 predates the shared lease and RPM ledgers, so starting version 2
+   provider work before this point can exceed workspace or channel capacity even
+   though Outbox claims are version-separated. Abort on any dead or stuck v1 row;
+   never cancel and recreate accepted provider work to shorten the drain.
+6. Prepare a handoff env with all four owner flags `false` and
+   `GENERATION_WRITES_ENABLED=false`. Validate it with
+   `node scripts/validate-deployment-config.mjs --allow-zero-drain-owners --env-file <handoff-env>`.
+   Disable both old owner flags and recreate only `worker`; confirm zero dispatcher
+   and zero reconciler owners. Then use the normal validator on an env with both
+   candidate flags `true`, recreate only `worker-new`, and confirm exactly one owner
+   of each subsystem. A double-owner observation is a release blocker.
+7. Set `GENERATION_WRITES_ENABLED=true`, recreate the version 2 API, verify its
+   readiness, and submit one canary request. Its business deadline must be computed
+   after writes are re-enabled, and only the candidate may claim its version 2 row.
+8. Stop the old Worker gracefully after its Hatchet runs and business attempts are
+   terminal. The 50-minute Compose grace period is a ceiling,
    not evidence that drain completed.
-8. Remove v1 code only in a later release after backup retention and reconciliation
+9. Remove v1 code only in a later release after backup retention and reconciliation
    windows have elapsed.
 
 For Cloud, compose with `infra/compose/cloud/compose.yaml` and
@@ -36,9 +52,56 @@ For Cloud, compose with `infra/compose/cloud/compose.yaml` and
 unspecified order. Do not use `--scale` on an owner-enabled service. The override
 labels both revisions for monitoring and evidence collection.
 
-Only one revision may dispatch new work for a workflow version. Unknown-outcome
-reconciliation remains business-database based and must stay enabled on exactly
-one active revision. Compose cannot enforce singleton ownership across multiple
+## Drain proof queries
+
+Record the maintenance start time before step 4. Run these read-only queries with
+the recovery-audit connection. Bind `:maintenance_started` to that recorded UTC
+timestamp using the SQL client (or replace it with an explicit `timestamptz`
+literal). The first two queries must return no rows before handoff; the third count
+must remain zero while writes are paused.
+
+```sql
+begin;
+select set_config('app.service_role', 'on', true);
+
+select status, count(*)
+from outbox_events
+where topic = 'generation.job.requested'
+  and payload->>'schemaVersion' = '1'
+  and status in ('pending', 'sending', 'dead')
+group by status;
+
+select attempt.status, count(distinct attempt.id)
+from generation_attempts attempt
+where attempt.status in (
+  'created', 'claimed', 'submitting', 'accepted', 'materializing',
+  'outcome_unknown'
+)
+and exists (
+  select 1 from outbox_events event
+  where event.topic = 'generation.job.requested'
+    and event.payload->>'schemaVersion' = '1'
+    and event.payload->>'attemptId' = attempt.id::text
+)
+group by attempt.status;
+
+select count(*)
+from outbox_events
+where topic = 'generation.job.requested'
+  and payload->>'schemaVersion' = '2'
+  and created_at >= :maintenance_started;
+
+rollback;
+```
+
+Only the legacy dispatcher executes during the v1 drain; version 2 writes remain
+paused until after the owner handoff. Version-separated claims prevent either revision
+from consuming the wrong contract, and malformed generation payloads are routed
+to the candidate after cutover so they fail closed instead of remaining invisible.
+Hatchet keeps already-created version 1 runs on the old registered workflow while
+new runs target `media-generation-v2` after cutover. Unknown-outcome reconciliation
+remains business-database based and must stay enabled on exactly one active
+revision. Compose cannot enforce singleton ownership across multiple
 Compose projects or manual replicas; operators must prove the owner counts at
 each transition and abort on any double-owner observation.
 
@@ -46,10 +109,18 @@ each transition and abort on any double-owner observation.
 
 Stop routing new work to the candidate when error rate, Outbox age, unknown count,
 provider create count, ledger mismatch, or SSE recovery exceeds the release SLO.
-Do not kill accepted/materializing runs. For rollback, first disable both owner
-flags on `worker-new` and confirm zero owners, then enable both on `worker` and
-restore the previous dispatcher routing. Keep the candidate available for runs it
-already claimed and follow the rollback runbook.
+Do not kill accepted/materializing runs. For rollback, first set
+`GENERATION_WRITES_ENABLED=false`, recreate the API, and verify that batch creation,
+paid retry, and nonterminal administrator recovery each return
+`503 generation_writes_paused`. Automatic unknown reconciliation remains owned by
+the current Worker until the owner handoff; terminal administrator resolutions stay
+available, while `accepted` and `provider_succeeded` recovery remain paused. Then
+disable both owner flags on `worker-new`, validate and confirm the explicit zero-owner
+state, enable both on `worker`, and restore the previous dispatcher routing. Keep the
+candidate available for runs it already claimed and follow the rollback runbook.
 
 Cloud and OSS drain must each be exercised in Staging. SDK graceful shutdown tests
-and a large `stop_grace_period` do not prove cross-version drain.
+and a large `stop_grace_period` do not prove cross-version drain. The evidence must
+include one version 1 run finishing on the old image before one version 2 run starts
+on the candidate, the measured zero-owner handoff, unchanged provider task IDs,
+and no duplicate reservation, capacity lease, rate-window, or ledger entry.

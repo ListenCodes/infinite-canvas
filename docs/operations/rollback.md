@@ -6,8 +6,11 @@ execution.
 
 ## Application rollback
 
-1. Freeze new generation creation with the environment feature gate or ingress
-   maintenance rule; keep reads, SSE, admin reconciliation, and running Workers on.
+1. Set `GENERATION_WRITES_ENABLED=false`, recreate the API, and verify that batch
+   creation, paid retry, and nonterminal administrator recovery return
+   `503 generation_writes_paused`. An ingress maintenance rule may be added as a
+   second barrier but cannot replace the server-side gate. Keep reads, SSE, terminal
+   administrator resolution, automatic reconciliation, and running Workers on.
 2. Capture current image digests, migration checksums, Outbox counts, active attempt
    states, wallet totals, event cursor, and object inventory checkpoint.
 3. Restore the previous Web and API digests if they are compatible with the expanded

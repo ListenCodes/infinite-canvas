@@ -13,8 +13,8 @@ import {
 import type { AttemptExecution } from "./types.js";
 
 const workflowInput = generationWorkflowInputSchema.parse({
-  schemaVersion: 1,
-  workflowName: "media-generation-v1",
+  schemaVersion: 2,
+  workflowName: "media-generation-v2",
   workspaceId: "00000000-0000-4000-8000-000000000101",
   projectId: "00000000-0000-4000-8000-000000000201",
   batchId: "00000000-0000-4000-8000-000000000601",
@@ -22,6 +22,13 @@ const workflowInput = generationWorkflowInputSchema.parse({
   attemptId: "00000000-0000-4000-8000-000000000801",
   capability: "image",
   channelId: "00000000-0000-4000-8000-000000000301",
+  capacity: {
+    policyVersion: 1,
+    workspaceConcurrencyLimit: 3,
+    workspaceRateLimitPerMinute: 30,
+    channelConcurrencyLimit: 2,
+    channelRateLimitPerMinute: 60,
+  },
 });
 
 function execution(adapter: MediaProviderAdapter): AttemptExecution {
@@ -86,6 +93,17 @@ function repositoryFor(value: AttemptExecution, calls: string[]) {
     async isCancelRequested() {
       return false;
     },
+    async beginCancelAttempt() {
+      calls.push("begin-cancel");
+      return true;
+    },
+    async markCancelAttempted(
+      _input: typeof workflowInput,
+      _outcome: "not_supported" | "unknown",
+      _executorClaimId: string,
+    ) {
+      calls.push("cancel-attempted");
+    },
     async confirmCanceled() {
       calls.push("canceled");
     },
@@ -106,6 +124,101 @@ function context() {
     signal: new AbortController().signal,
   };
 }
+
+test("capacity admission runs after the attempt claim and busy work does not load provider state", async () => {
+  const calls: string[] = [];
+  const adapter: MediaProviderAdapter = {
+    type: "fake",
+    version: 1,
+    capability: "image",
+    validate() {},
+    async submit() {
+      throw new Error("provider must not be called while capacity is busy");
+    },
+  };
+  const executor = new GenerationExecutor(
+    repositoryFor(execution(adapter), calls),
+    {} as never,
+  );
+  const result = await executor.execute(workflowInput, context(), {
+    async acquireLease() {
+      calls.push("capacity");
+      return "busy";
+    },
+    async consumeProviderRequest() {
+      throw new Error("rate capacity must not be consumed without a lease");
+    },
+  });
+  assert.deepEqual(result, { outcome: "pending", nextPollDelayMs: 3_000 });
+  assert.deepEqual(calls, ["claim", "capacity"]);
+});
+
+test("an expired unsubmitted attempt fails without waiting for provider capacity", async () => {
+  const calls: string[] = [];
+  const adapter: MediaProviderAdapter = {
+    type: "fake",
+    version: 1,
+    capability: "image",
+    validate() {},
+    async submit() {
+      throw new Error("expired work must not call the provider");
+    },
+  };
+  const result = await new GenerationExecutor(
+    repositoryFor(execution(adapter), calls),
+    {} as never,
+  ).execute(workflowInput, context(), {
+    async acquireLease() {
+      calls.push("capacity");
+      return "expired";
+    },
+    async consumeProviderRequest() {
+      throw new Error("expired work must not consume provider RPM");
+    },
+  });
+  assert.equal(result.outcome, "failed");
+  assert.deepEqual(calls, ["claim", "capacity", "failed"]);
+});
+
+test("materialization recovery holds a lease without consuming provider rate capacity", async () => {
+  const calls: string[] = [];
+  const adapter: MediaProviderAdapter = {
+    type: "fake",
+    version: 1,
+    capability: "image",
+    validate() {},
+    async submit() {
+      throw new Error("materialization recovery must not submit");
+    },
+  };
+  const materializing = execution(adapter);
+  materializing.status = "materializing";
+  materializing.evidence = {
+    materializedAsset: {
+      objectKey: "workspace/image/job/attempt/original",
+      mime: "image/png",
+      bytes: "10",
+      sha256: "hash",
+      kind: "image",
+    },
+  };
+  const result = await new GenerationExecutor(
+    repositoryFor(materializing, calls),
+    {} as never,
+  ).execute(workflowInput, context(), {
+    async acquireLease() {
+      calls.push("capacity");
+      return "acquired";
+    },
+    async consumeProviderRequest() {
+      calls.push("rate");
+      return "acquired";
+    },
+  });
+  assert.equal(result.outcome, "succeeded");
+  assert.equal(calls.includes("rate"), false);
+  assert.deepEqual(calls, ["claim", "capacity", "load", "materialized", "complete"]);
+});
 
 test("lost paid POST response enters outcome_unknown without materialization", async () => {
   const calls: string[] = [];
@@ -364,6 +477,10 @@ test("object write survives a crash before materialized evidence without repeati
     async isCancelRequested() {
       return false;
     },
+    async beginCancelAttempt() {
+      return true;
+    },
+    async markCancelAttempted() {},
     async confirmCanceled() {},
     async complete() {
       calls.push("complete");
@@ -499,5 +616,124 @@ test("accepted video resumes from provider task id without another create POST",
     "storage",
     "materialized",
     "complete",
+  ]);
+});
+
+test("an accepted submit ends the activation before the first provider poll", async () => {
+  const calls: string[] = [];
+  const adapter: MediaProviderAdapter = {
+    type: "fake",
+    version: 1,
+    capability: "image",
+    validate() {},
+    async submit() {
+      calls.push("submit");
+      return { outcome: "accepted", providerTaskId: "provider-task-2", nextPollDelayMs: 4_000 };
+    },
+    async poll() {
+      calls.push("poll");
+      throw new Error("poll must run in a rate-limited follow-up activation");
+    },
+  };
+  const result = await new GenerationExecutor(
+    repositoryFor(execution(adapter), calls),
+    {
+      async materialize() { throw new Error("must not materialize"); },
+      async recoverMaterialized() { return undefined; },
+    },
+  ).execute(workflowInput, context());
+  assert.deepEqual(result, { outcome: "pending", nextPollDelayMs: 4_000 });
+  assert.deepEqual(calls, ["claim", "load", "submitting", "submit", "accepted"]);
+});
+
+for (const cancellation of ["not_supported", "unknown"] as const) {
+  test(`a ${cancellation} provider cancel is persisted and the next activation polls`, async () => {
+    const calls: string[] = [];
+    const adapter: MediaProviderAdapter = {
+      type: "fake",
+      version: 1,
+      capability: "image",
+      validate() {},
+      async submit() { throw new Error("must not submit"); },
+      async cancel() {
+        calls.push(`cancel:${cancellation}`);
+        return cancellation;
+      },
+      async poll() {
+        calls.push("poll");
+        return { status: "pending", nextPollDelayMs: 5_000 };
+      },
+    };
+    const accepted = execution(adapter);
+    accepted.status = "accepted";
+    accepted.providerTaskId = "provider-task-cancel";
+    accepted.evidence = {};
+    const repository = repositoryFor(accepted, calls);
+    repository.isCancelRequested = async () => true;
+    repository.markCancelAttempted = async (_input, outcome) => {
+      calls.push(`persist-cancel:${outcome}`);
+      accepted.evidence = { providerCancel: { outcome } };
+    };
+    const executor = new GenerationExecutor(repository, {
+      async materialize() { throw new Error("must not materialize"); },
+      async recoverMaterialized() { return undefined; },
+    });
+    assert.deepEqual(await executor.execute(workflowInput, context()), {
+      outcome: "pending",
+      nextPollDelayMs: 3_000,
+    });
+    assert.deepEqual(await executor.execute(workflowInput, context()), {
+      outcome: "pending",
+      nextPollDelayMs: 5_000,
+    });
+    assert.deepEqual(calls, [
+      "claim", "load", "begin-cancel", `cancel:${cancellation}`, `persist-cancel:${cancellation}`,
+      "claim", "load", "poll",
+    ]);
+  });
+}
+
+test("a cancel transport error is persisted before the next activation polls", async () => {
+  const calls: string[] = [];
+  const adapter: MediaProviderAdapter = {
+    type: "fake",
+    version: 1,
+    capability: "image",
+    validate() {},
+    async submit() { throw new Error("must not submit"); },
+    async cancel() {
+      calls.push("cancel");
+      throw new Error("connection reset after cancel");
+    },
+    async poll() {
+      calls.push("poll");
+      return { status: "pending", nextPollDelayMs: 5_000 };
+    },
+  };
+  const accepted = execution(adapter);
+  accepted.status = "accepted";
+  accepted.providerTaskId = "provider-task-cancel-error";
+  accepted.evidence = {};
+  const repository = repositoryFor(accepted, calls);
+  repository.isCancelRequested = async () => true;
+  repository.markCancelAttempted = async (_input, outcome) => {
+    calls.push(`persist-cancel:${outcome}`);
+    accepted.evidence = { providerCancel: { outcome } };
+  };
+  const executor = new GenerationExecutor(repository, {
+    async materialize() { throw new Error("must not materialize"); },
+    async recoverMaterialized() { return undefined; },
+  });
+  assert.deepEqual(await executor.execute(workflowInput, context()), {
+    outcome: "pending",
+    nextPollDelayMs: 3_000,
+  });
+  assert.deepEqual(await executor.execute(workflowInput, context()), {
+    outcome: "pending",
+    nextPollDelayMs: 5_000,
+  });
+  assert.deepEqual(calls, [
+    "claim", "load", "begin-cancel", "cancel", "persist-cancel:unknown",
+    "claim", "load", "poll",
   ]);
 });

@@ -4,9 +4,15 @@ import { attemptIdSchema, batchIdSchema, channelIdSchema, jobIdSchema, projectId
 import { providerAcceptanceSchema } from "./errors.js";
 import { generationCapabilitySchema } from "./status.js";
 
-export const generationWorkflowInputSchema = z.object({
-  schemaVersion: z.literal(1),
-  workflowName: z.enum(["media-generation-v1"]),
+export const generationCapacitySnapshotSchema = z.object({
+  policyVersion: z.number().int().positive(),
+  workspaceConcurrencyLimit: z.number().int().positive(),
+  workspaceRateLimitPerMinute: z.number().int().positive(),
+  channelConcurrencyLimit: z.number().int().positive(),
+  channelRateLimitPerMinute: z.number().int().positive(),
+});
+
+const generationWorkflowIdentitySchema = z.object({
   workspaceId: workspaceIdSchema,
   projectId: projectIdSchema,
   batchId: batchIdSchema,
@@ -14,6 +20,26 @@ export const generationWorkflowInputSchema = z.object({
   attemptId: attemptIdSchema,
   capability: generationCapabilitySchema,
   channelId: channelIdSchema,
+});
+
+export const generationWorkflowV1InputSchema = generationWorkflowIdentitySchema.extend({
+  schemaVersion: z.literal(1),
+  workflowName: z.literal("media-generation-v1"),
+});
+
+export const generationWorkflowInputSchema = generationWorkflowIdentitySchema.extend({
+  schemaVersion: z.literal(2),
+  workflowName: z.literal("media-generation-v2"),
+  capacity: generationCapacitySnapshotSchema,
+}).superRefine((value, context) => {
+  const expectedWorkspaceConcurrency = value.capability === "image" ? 3 : 2;
+  if (value.capacity.workspaceConcurrencyLimit !== expectedWorkspaceConcurrency) {
+    context.addIssue({
+      code: "custom",
+      path: ["capacity", "workspaceConcurrencyLimit"],
+      message: `media-generation-v2 requires workspace concurrency ${expectedWorkspaceConcurrency} for ${value.capability}`,
+    });
+  }
 });
 
 export const localDataImportWorkflowInputSchema = z.object({
@@ -50,6 +76,8 @@ export const providerSubmitResultSchema = z.discriminatedUnion("outcome", [
 ]);
 
 export type GenerationWorkflowInput = z.infer<typeof generationWorkflowInputSchema>;
+export type GenerationWorkflowV1Input = z.infer<typeof generationWorkflowV1InputSchema>;
+export type GenerationCapacitySnapshot = z.infer<typeof generationCapacitySnapshotSchema>;
 export type ClaimAttemptResult = z.infer<typeof claimAttemptResultSchema>;
 export type ProviderSubmitResult = z.infer<typeof providerSubmitResultSchema>;
 export type LocalDataImportWorkflowInput = z.infer<typeof localDataImportWorkflowInputSchema>;

@@ -15,7 +15,7 @@ import { ImportExecutor } from "./import-executor.js";
 import { GenerationRepository } from "./repository.js";
 import { ObjectStorage } from "./storage.js";
 import { WorkerMetricsServer } from "./metrics.js";
-import { createLocalDataImportWorkflow, createMediaGenerationWorkflow, MEDIA_GENERATION_WORKER_V1 } from "./workflow.js";
+import { createLocalDataImportWorkflow, createMediaGenerationWorkflow, MEDIA_GENERATION_WORKER_V2 } from "./workflow.js";
 
 const config = loadWorkerConfig();
 const database = createDatabase(config.BUSINESS_DATABASE_URL, { applicationName: "infinite-canvas-worker" });
@@ -41,10 +41,10 @@ const repository = new GenerationRepository(
     metrics.observeProviderRequest(observation),
 );
 const executor = new GenerationExecutor(repository, storage);
-const generationWorkflows = createMediaGenerationWorkflow(hatchet, executor);
+const generationWorkflows = createMediaGenerationWorkflow(hatchet, executor, repository);
 const importWorkflow = createLocalDataImportWorkflow(hatchet, new ImportExecutor(database.client, storage, config.MAX_MEDIA_BYTES, uuidv7));
-const worker = await hatchet.worker(MEDIA_GENERATION_WORKER_V1, {
-  workflows: [generationWorkflows.workflow, generationWorkflows.executionTask, importWorkflow],
+const worker = await hatchet.worker(MEDIA_GENERATION_WORKER_V2, {
+  workflows: [generationWorkflows.workflow, ...generationWorkflows.executionTasks, importWorkflow],
   slots: config.HATCHET_WORKER_SLOTS,
   durableSlots: config.HATCHET_DURABLE_SLOTS,
   handleKill: false,

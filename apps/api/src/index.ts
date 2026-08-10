@@ -39,11 +39,22 @@ const server = await buildServer({
     ffmpegPath: config.FFMPEG_PATH,
   }),
   importService: new ImportService(database.client, supabase, config.STORAGE_BUCKET, config.MAX_IMPORT_BYTES, createId),
-  generationService: new GenerationService(database.client, createId, config.IDEMPOTENCY_TTL_SECONDS),
+  generationService: new GenerationService(
+    database.client,
+    createId,
+    config.IDEMPOTENCY_TTL_SECONDS,
+    config.GENERATION_WRITES_ENABLED === "true",
+  ),
   eventService: new EventService(database.client),
   eventBroker,
   readinessProbe: async () => { await database.client`select 1`; },
-  adminService: new AdminService(database.client, config.CREDENTIAL_MASTER_KEY, config.ADMIN_LARGE_DEBIT_THRESHOLD, createId),
+  adminService: new AdminService(
+    database.client,
+    config.CREDENTIAL_MASTER_KEY,
+    config.ADMIN_LARGE_DEBIT_THRESHOLD,
+    createId,
+    config.GENERATION_WRITES_ENABLED === "true",
+  ),
 });
 
 const shutdown = async (signal: string): Promise<void> => {

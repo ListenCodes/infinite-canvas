@@ -11,7 +11,7 @@ import type { WorkerConfig } from "./config.js";
 import {
   dispatchedGenerationWorkflowInputSchema,
   LOCAL_DATA_IMPORT_WORKFLOW_V1,
-  MEDIA_GENERATION_WORKFLOW_V1,
+  MEDIA_GENERATION_WORKFLOW_V2,
 } from "./workflow.js";
 
 type Sql = postgres.Sql;
@@ -66,7 +66,7 @@ export class OutboxDispatcher {
       await transaction`select set_config('app.service_role', 'on', true)`;
       return transaction<
         OutboxRow[]
-      >`select id, workspace_id, topic, payload, attempts, aggregate_id, created_at, dispatch_started_token from app.claim_outbox(${this.workerId}, ${this.config.OUTBOX_BATCH_SIZE})`;
+      >`select id, workspace_id, topic, payload, attempts, aggregate_id, created_at, dispatch_started_token from app.claim_outbox(${this.workerId}, 2, ${this.config.OUTBOX_BATCH_SIZE})`;
     });
     for (const row of rows) await this.dispatch(row);
     return rows.length;
@@ -98,10 +98,15 @@ export class OutboxDispatcher {
             where outbox.id = ${row.id} and outbox.status = 'sending' and outbox.locked_by = ${this.workerId}
               and attempt.id = ${input.attemptId} and attempt.workspace_id = ${input.workspaceId}
               and attempt.job_id = ${input.jobId} and attempt.channel_id = ${input.channelId}
+              and attempt.capacity_policy_version = ${input.capacity.policyVersion}
+              and attempt.workspace_concurrency_limit = ${input.capacity.workspaceConcurrencyLimit}
+              and attempt.workspace_rate_limit_per_minute = ${input.capacity.workspaceRateLimitPerMinute}
+              and attempt.channel_concurrency_limit = ${input.capacity.channelConcurrencyLimit}
+              and attempt.channel_rate_limit_per_minute = ${input.capacity.channelRateLimitPerMinute}
               and job.id = ${input.jobId} and job.batch_id = ${input.batchId}
               and job.capability = ${input.capability}::generation_capability
               and batch.project_id = ${input.projectId}
-              and attempt.status not in ('succeeded', 'failed', 'canceled')
+              and attempt.status in ('created', 'claimed', 'submitting', 'accepted', 'materializing')
             for update of outbox, attempt, job
           `;
           const candidate = candidates[0];
@@ -124,7 +129,7 @@ export class OutboxDispatcher {
         });
         generationDispatchAttempted = true;
         const reference = await this.hatchet.runNoWait(
-          MEDIA_GENERATION_WORKFLOW_V1,
+          MEDIA_GENERATION_WORKFLOW_V2,
           dispatchedInput,
         );
         const workflowRunId = await reference.getWorkflowRunId();
@@ -138,12 +143,17 @@ export class OutboxDispatcher {
               and attempt.workspace_id = ${input.workspaceId}
               and attempt.job_id = ${input.jobId}
               and attempt.channel_id = ${input.channelId}
+              and attempt.capacity_policy_version = ${input.capacity.policyVersion}
+              and attempt.workspace_concurrency_limit = ${input.capacity.workspaceConcurrencyLimit}
+              and attempt.workspace_rate_limit_per_minute = ${input.capacity.workspaceRateLimitPerMinute}
+              and attempt.channel_concurrency_limit = ${input.capacity.channelConcurrencyLimit}
+              and attempt.channel_rate_limit_per_minute = ${input.capacity.channelRateLimitPerMinute}
               and job.id = ${input.jobId} and job.current_attempt_id = attempt.id
               and job.batch_id = ${input.batchId}
               and job.capability = ${input.capability}::generation_capability
               and batch.id = job.batch_id and batch.project_id = ${input.projectId}
               and attempt.executor_dispatch_token = ${dispatchedInput.dispatchToken}
-              and attempt.status not in ('succeeded', 'failed', 'canceled')
+              and attempt.status in ('created', 'claimed', 'submitting', 'accepted', 'materializing')
               and (attempt.executor_run_id is null or attempt.executor_run_id = ${workflowRunId})
           `;
           await transaction`
