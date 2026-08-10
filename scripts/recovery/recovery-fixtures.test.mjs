@@ -448,13 +448,12 @@ test("recovery topology isolates the Hatchet observer from application data and 
   for (const required of ["business-db:", "hatchet-db:", "hatchet-lite:", "moto:", "recovery-audit:", "hatchet-terminal-observer:"]) {
     assert.ok(compose.includes(required), required);
   }
-  const loopbackPort = (target, published) => ({ target, published, host_ip: "127.0.0.1", protocol: "tcp" });
-  assert.deepEqual(parsed.services["business-db"].ports, [loopbackPort(5432, "${RECOVERY_BUSINESS_DB_PORT:?required}")]);
-  assert.deepEqual(parsed.services["hatchet-db"].ports, [loopbackPort(5432, "${RECOVERY_HATCHET_DB_PORT:?required}")]);
-  assert.deepEqual(parsed.services.moto.ports, [loopbackPort(5000, "${RECOVERY_MOTO_PORT:?required}")]);
+  assert.deepEqual(parsed.services["business-db"].ports, ["127.0.0.1:${RECOVERY_BUSINESS_DB_PORT:?required}:5432"]);
+  assert.deepEqual(parsed.services["hatchet-db"].ports, ["127.0.0.1:${RECOVERY_HATCHET_DB_PORT:?required}:5432"]);
+  assert.deepEqual(parsed.services.moto.ports, ["127.0.0.1:${RECOVERY_MOTO_PORT:?required}:5000"]);
   assert.deepEqual(parsed.services["hatchet-lite"].ports, [
-    loopbackPort(8888, "${RECOVERY_HATCHET_API_PORT:?required}"),
-    loopbackPort(8733, "${RECOVERY_HATCHET_HEALTH_PORT:?required}"),
+    "127.0.0.1:${RECOVERY_HATCHET_API_PORT:?required}:8888",
+    "127.0.0.1:${RECOVERY_HATCHET_HEALTH_PORT:?required}:8733",
   ]);
   assert.match(compose, /HATCHET_CLIENT_TOKEN_FILE: \/run\/secrets\/hatchet-client-token/);
   assert.match(compose, /source: recovery-hatchet-client-token/);

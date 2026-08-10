@@ -103,7 +103,7 @@ export class UnknownOutcomeReconciler {
           update generation_attempts
           set reconcile_after = ${nextReconcile},
               evidence_json = coalesce(evidence_json, '{}'::jsonb) ||
-                jsonb_build_object('lastReconciledAt', ${now.toISOString()}, 'reconciliation', 'provider_query_unavailable'),
+                jsonb_build_object('lastReconciledAt', ${now.toISOString()}::text, 'reconciliation', 'provider_query_unavailable'),
               updated_at = now()
           where id = ${candidate.attempt_id}
         `;
@@ -125,7 +125,7 @@ export class UnknownOutcomeReconciler {
         values (
           ${this.createId()}, ${candidate.workspace_id}, ${candidate.attempt_id}, ${current.amount}::bigint,
           'Provider acceptance could not be confirmed within 24 hours',
-          jsonb_build_object('releasedAt', ${now.toISOString()}, 'policy', 'outcome_unknown_24h_release')
+          jsonb_build_object('releasedAt', ${now.toISOString()}::text, 'policy', 'outcome_unknown_24h_release')
         ) on conflict (attempt_id) do nothing
       `;
       await transaction`

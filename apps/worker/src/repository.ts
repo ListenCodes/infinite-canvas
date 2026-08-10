@@ -683,7 +683,7 @@ export class GenerationRepository {
             reconcile_after = least(release_after, ${nextReconcile}),
             evidence_json = coalesce(evidence_json, '{}'::jsonb) ||
               jsonb_build_object(
-                'lastReconciledAt', ${now.toISOString()},
+                'lastReconciledAt', ${now.toISOString()}::text,
                 'reconciliation', 'capacity_deferred'
               ),
             updated_at = now()
@@ -721,7 +721,7 @@ export class GenerationRepository {
         set executor_claim_id = null,
             reconcile_after = least(release_after, ${new Date(now.getTime() + 60 * 60 * 1000)}),
             evidence_json = coalesce(evidence_json, '{}'::jsonb) ||
-              jsonb_build_object('lastReconciledAt', ${now.toISOString()}, 'reconciliation', ${result}),
+              jsonb_build_object('lastReconciledAt', ${now.toISOString()}::text, 'reconciliation', ${result}::text),
             updated_at = now()
         where id = ${input.attemptId} and status = 'outcome_unknown'
           and executor_claim_id = ${executorClaimId}
@@ -983,7 +983,7 @@ export class GenerationRepository {
         set evidence_json = coalesce(attempt.evidence_json, '{}'::jsonb) ||
               jsonb_build_object(
                 'providerCancel', jsonb_build_object(
-                  'outcome', ${outcome},
+                  'outcome', ${outcome}::text,
                   'attemptedAt', now()
                 )
               ),
@@ -1331,7 +1331,7 @@ export class GenerationRepository {
         ${input.workspaceId}, 'job', ${input.jobId}, ${input.projectId}, ${input.batchId}, ${input.jobId}, ${input.attemptId},
         'generation.job.state_changed',
         jsonb_strip_nulls(jsonb_build_object(
-          'status', ${status}, 'errorCode', ${errorCode ?? null}, 'errorMessage', ${message ?? null},
+          'status', ${status}::text, 'errorCode', ${errorCode ?? null}::text, 'errorMessage', ${message ?? null}::text,
           'attemptNo', attempt.attempt_no, 'jobVersion', job.version
         ))
       from generation_attempts attempt join generation_jobs job on job.id = attempt.job_id

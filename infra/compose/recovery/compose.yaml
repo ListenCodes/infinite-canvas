@@ -5,11 +5,7 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${RECOVERY_POSTGRES_PASSWORD:?required}
       POSTGRES_DB: infinite_canvas
-    ports:
-      - target: 5432
-        published: "${RECOVERY_BUSINESS_DB_PORT:?required}"
-        host_ip: 127.0.0.1
-        protocol: tcp
+    ports: ["127.0.0.1:${RECOVERY_BUSINESS_DB_PORT:?required}:5432"]
     volumes: ["business-data:/var/lib/postgresql/data"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d infinite_canvas"]
@@ -24,11 +20,7 @@ services:
       POSTGRES_USER: hatchet
       POSTGRES_PASSWORD: ${RECOVERY_POSTGRES_PASSWORD:?required}
       POSTGRES_DB: hatchet
-    ports:
-      - target: 5432
-        published: "${RECOVERY_HATCHET_DB_PORT:?required}"
-        host_ip: 127.0.0.1
-        protocol: tcp
+    ports: ["127.0.0.1:${RECOVERY_HATCHET_DB_PORT:?required}:5432"]
     volumes: ["hatchet-data:/var/lib/postgresql/data"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U hatchet -d hatchet"]
@@ -42,11 +34,7 @@ services:
     environment:
       MOTO_HOST: 0.0.0.0
       MOTO_PORT: "5000"
-    ports:
-      - target: 5000
-        published: "${RECOVERY_MOTO_PORT:?required}"
-        host_ip: 127.0.0.1
-        protocol: tcp
+    ports: ["127.0.0.1:${RECOVERY_MOTO_PORT:?required}:5000"]
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; s=socket.socket(); s.settimeout(2); raise SystemExit(s.connect_ex(('127.0.0.1', 5000)))"]
       interval: 3s
@@ -69,14 +57,8 @@ services:
       SERVER_INTERNAL_CLIENT_INTERNAL_GRPC_BROADCAST_ADDRESS: hatchet-lite:7077
       SERVER_MSGQUEUE_KIND: postgres
     ports:
-      - target: 8888
-        published: "${RECOVERY_HATCHET_API_PORT:?required}"
-        host_ip: 127.0.0.1
-        protocol: tcp
-      - target: 8733
-        published: "${RECOVERY_HATCHET_HEALTH_PORT:?required}"
-        host_ip: 127.0.0.1
-        protocol: tcp
+      - "127.0.0.1:${RECOVERY_HATCHET_API_PORT:?required}:8888"
+      - "127.0.0.1:${RECOVERY_HATCHET_HEALTH_PORT:?required}:8733"
     volumes: ["hatchet-config:/config"]
     depends_on:
       hatchet-db: { condition: service_healthy }

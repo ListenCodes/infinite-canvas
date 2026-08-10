@@ -806,11 +806,14 @@ export class AdminService {
           )
         `;
       }
-      await transaction`
+      const jobs = await transaction<{ version: number }[]>`
         update generation_jobs set status = ${status}::job_status, version = version + 1,
-          terminal_at = case when ${status} = 'failed' then now() else null end, updated_at = now()
+          terminal_at = case when ${status}::job_status = 'failed' then now() else null end, updated_at = now()
         where id = ${current.job_id} and current_attempt_id = ${attemptId}
+        returning version
       `;
+      const job = jobs[0];
+      if (!job) throw new AppError(409, "generation_attempt_changed", "Generation attempt changed during resolution");
       await transaction`
         insert into audit_logs (id, workspace_id, actor_user_id, actor_type, action, target_type, target_id, reason, after_summary, correlation_id)
         values (${this.createId()}, ${current.workspace_id}, ${actorUserId}, 'admin', 'outcome_unknown.resolve', 'attempt', ${attemptId},
@@ -818,9 +821,8 @@ export class AdminService {
       `;
       await transaction`
         insert into generation_job_events (workspace_id, aggregate_type, aggregate_id, project_id, batch_id, job_id, attempt_id, type, payload)
-        select ${current.workspace_id}, 'job', ${current.job_id}, ${current.project_id}, ${current.batch_id}, ${current.job_id}, ${attemptId},
-               'generation.job.state_changed', jsonb_build_object('status', ${status}, 'attemptNo', attempt.attempt_no, 'jobVersion', job.version)
-        from generation_attempts attempt join generation_jobs job on job.id = attempt.job_id where attempt.id = ${attemptId}
+        values (${current.workspace_id}, 'job', ${current.job_id}, ${current.project_id}, ${current.batch_id}, ${current.job_id}, ${attemptId},
+                'generation.job.state_changed', ${transaction.json({ status, attemptNo: current.attempt_no, jobVersion: job.version })})
       `;
       await transaction`select app.refresh_generation_batch(${current.batch_id})`;
       const response = unknownResolutionResponseSchema.parse({ attemptId, status });
