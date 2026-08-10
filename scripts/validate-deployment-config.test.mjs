@@ -277,16 +277,19 @@ test("release evidence is finalized after every leaf publisher without clobber",
   assert.match(finalizer, /^\s*needs:\s*publish-pages\s*$/m);
   assert.match(finalizer, /cmp --silent/);
   assert.doesNotMatch(finalizer, /--clobber/);
+  assert.match(finalizer, /combined-restore-run-\$\{GITHUB_RUN_ID\}-attempt-\$\{GITHUB_RUN_ATTEMPT\}\.json/);
   assert.match(finalizer, /gh release edit "\$GITHUB_REF_NAME" --draft=false --latest/);
 });
 
-test("tag promotion persists and reuses one release set before writing image tags", async () => {
+test("tag promotion reuses one release set but always regenerates recovery evidence", async () => {
   const content = await readFile(resolve(repository, ".github/workflows/docker-image.yml"), "utf8");
   const workflow = parse(content);
   const steps = workflow.jobs?.["verify-and-promote-release-manifest"]?.steps;
   assert.ok(Array.isArray(steps));
   const promote = steps.find(({ name }) => name === "Establish release set and promote immutable manifests");
   assert.ok(promote?.run);
+  const stage = steps.find(({ name }) => name === "Stage flat release artifact");
+  assert.match(stage?.run ?? "", /release-artifact\/combined-restore\.json/);
   const createBoundary = promote.run.indexOf('gh release create "$GITHUB_REF_NAME"');
   const reuseBoundary = promote.run.indexOf('gh release download "$GITHUB_REF_NAME"');
   const shaPromotion = promote.run.indexOf('sha_tag="${image}:sha-${GITHUB_SHA}"');
@@ -297,11 +300,19 @@ test("tag promotion persists and reuses one release set before writing image tag
   assert.match(promote.run, /--draft --verify-tag --generate-notes/);
   assert.match(promote.run, /The persisted release set, not a rebuilt candidate, is authoritative on reruns/);
   assert.match(promote.run, /RELEASE_MANIFEST_PATH="\$RUNNER_TEMP\/release-images\.json"/);
-  assert.match(promote.run, /gh release download "\$GITHUB_REF_NAME" --pattern combined-restore\.json/);
+  assert.doesNotMatch(promote.run, /gh release download "\$GITHUB_REF_NAME" --pattern combined-restore\.json/);
+  assert.match(promote.run, /npm run recovery:drill/);
   assert.match(promote.run, /\.candidate\.releaseManifest\.sha256 == \$manifestSha/);
+  assert.match(promote.run, /\.procedureVersion == 5/);
+  assert.match(promote.run, /\.candidate\.sourceDirty == false/);
+  assert.match(promote.run, /local_combined_restore_with_real_terminal_hatchet_run/);
+  assert.match(promote.run, /\.restored\.realHatchetRun\.status == "COMPLETED"/);
+  assert.match(promote.run, /infinite-canvas-recovery-terminal-probe-v1/);
+  assert.match(promote.run, /\.restored\.realHatchetRun\.inputSha256/);
+  assert.match(promote.run, /\.restored\.realHatchetRun\.outputSha256/);
   const artifact = steps.find(({ uses }) => String(uses).startsWith("actions/upload-artifact@"));
   assert.equal(artifact?.with?.overwrite, true);
-  assert.match(artifact?.with?.path ?? "", /release-evidence\/combined-restore\.json/);
+  assert.equal(artifact?.with?.path, "${{ runner.temp }}/release-artifact/*");
 });
 
 test("documentation image bases are immutable and recorded in the image lock", async () => {

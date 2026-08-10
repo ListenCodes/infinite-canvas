@@ -58,20 +58,23 @@ directory and are removed in `finally`; the selected evidence directory receives
 only the redacted `combined-restore.json`. Use an evidence path outside Git and the
 synchronized knowledge base.
 
-The default CI mode uses a deterministic row inside the restored real Hatchet
-schema to prove that both databases and job reconciliation participate in the same
-exercise. It is intentionally labelled
-`local_combined_restore_with_synthetic_control_plane_probe`; it is not evidence
-that an actual Hatchet workflow run survived recovery.
+The drill mints a one-hour Hatchet token inside the source control-plane container,
+passes it to a one-shot probe container through a temporary Compose secret, and
+runs the pure `infinite-canvas-recovery-terminal-probe-v1` task to `COMPLETED`.
+The source business fixture records that real run ID on its succeeded attempt.
+After restoring both databases and `/config`, the target uses a separate verifier
+entrypoint whose code has no worker registration or trigger path. It queries REST
+and gRPC for the same run, workflow version, task ID, terminal timestamp, and
+input/output hashes, and requires the complete run inventory to be byte-for-byte
+unchanged before and after verification. Hatchet Lite does not provide a scoped
+read-only token for this fixed version, so the separate entrypoint plus inventory
+check is the enforced local boundary. The token, nonce, and raw input/output never
+enter argv, environment values, Git, evidence, or the synchronized knowledge base;
+only redacted hashes and IDs are written to `combined-restore.json`.
 
-Actual Hatchet run recovery is a separate release-candidate exercise against the
-selected OSS backup or managed-service recovery path. Record a harmless terminal
-run ID before the checkpoint, restore the control plane and its secret/config
-material, query that same run through the restored Hatchet API, and reconcile it
-to the business attempt. Inject the Hatchet token through the operator secret
-manager; never put it on a command line, in a checked-in env file, or in the
-evidence report. The local script deliberately has no option that can label its
-synthetic marker as a real workflow run.
+This local Hatchet Lite proof closes the repository-owned OSS control-plane
+invariant. It does not replace a release-candidate exercise against the selected
+managed Hatchet/Supabase recovery path or production object storage.
 
 A failed local drill retries teardown for both exact Compose projects and verifies
 that no project-labelled container, volume, or network remains. A cleanup failure

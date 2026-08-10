@@ -256,23 +256,27 @@ jobs:
           done
           mkdir -p "$RUNNER_TEMP/release-evidence"
           manifest_sha="$(sha256sum "$RUNNER_TEMP/release-images.json" | cut -d ' ' -f 1)"
-          if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/tags/* ]] && \
-             gh release download "$GITHUB_REF_NAME" --pattern combined-restore.json --dir "$RUNNER_TEMP/release-evidence" >/dev/null 2>&1; then
-            jq -e --arg source "$GITHUB_SHA" --arg manifestSha "$manifest_sha" '
-              .candidate.sourceSha == $source and .candidate.releaseManifest.sha256 == $manifestSha
-            ' "$RUNNER_TEMP/release-evidence/combined-restore.json" >/dev/null
-          else
-            api_image="$(jq -er '.images.api.reference' "$RUNNER_TEMP/release-images.json")"
-            worker_image="$(jq -er '.images.worker.reference' "$RUNNER_TEMP/release-images.json")"
-            docker pull "$api_image"
-            docker pull "$worker_image"
-            API_IMAGE="$api_image" WORKER_IMAGE="$worker_image" \
-              RELEASE_MANIFEST_PATH="$RUNNER_TEMP/release-images.json" \
-              npm run recovery:drill -- --evidence-dir "$RUNNER_TEMP/release-evidence"
-            jq -e --arg source "$GITHUB_SHA" --arg manifestSha "$manifest_sha" '
-              .candidate.sourceSha == $source and .candidate.releaseManifest.sha256 == $manifestSha
-            ' "$RUNNER_TEMP/release-evidence/combined-restore.json" >/dev/null
-          fi
+          api_image="$(jq -er '.images.api.reference' "$RUNNER_TEMP/release-images.json")"
+          worker_image="$(jq -er '.images.worker.reference' "$RUNNER_TEMP/release-images.json")"
+          docker pull "$api_image"
+          docker pull "$worker_image"
+          API_IMAGE="$api_image" WORKER_IMAGE="$worker_image" \
+            RELEASE_MANIFEST_PATH="$RUNNER_TEMP/release-images.json" \
+            npm run recovery:drill -- --evidence-dir "$RUNNER_TEMP/release-evidence"
+          jq -e --arg source "$GITHUB_SHA" --arg manifestSha "$manifest_sha" '
+            .procedureVersion == 5 and
+            .candidate.sourceSha == $source and
+            .candidate.sourceDirty == false and
+            .candidate.releaseManifest.sha256 == $manifestSha and
+            .mode == "local_combined_restore_with_real_terminal_hatchet_run" and
+            .restored.realHatchetRun.status == "COMPLETED" and
+            .restored.realHatchetRun.taskName == "infinite-canvas-recovery-terminal-probe-v1" and
+            ([.restored.realHatchetRun.runId, .restored.realHatchetRun.workflowId,
+              .restored.realHatchetRun.workflowVersionId, .restored.realHatchetRun.taskExternalId,
+              .restored.realHatchetRun.finishedAt] | all(type == "string" and length > 0)) and
+            (.restored.realHatchetRun.inputSha256 | test("^[a-f0-9]{64}$")) and
+            (.restored.realHatchetRun.outputSha256 | test("^[a-f0-9]{64}$"))
+          ' "$RUNNER_TEMP/release-evidence/combined-restore.json" >/dev/null
           promote_immutable() {
             local target="$1"
             local source="$2"
@@ -303,13 +307,17 @@ jobs:
               promote_immutable "$release_tag" "${image}@${digest}" "$digest"
             done
           fi
+      - name: Stage flat release artifact
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/release-artifact"
+          cp "$RUNNER_TEMP/release-images.json" "$RUNNER_TEMP/release-artifact/release-images.json"
+          cp "$RUNNER_TEMP/release-images.env" "$RUNNER_TEMP/release-artifact/release-images.env"
+          cp "$RUNNER_TEMP/release-evidence/combined-restore.json" "$RUNNER_TEMP/release-artifact/combined-restore.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-images-${{ github.sha }}
-          path: |
-            ${{ runner.temp }}/release-images.json
-            ${{ runner.temp }}/release-images.env
-            ${{ runner.temp }}/release-evidence/combined-restore.json
+          path: ${{ runner.temp }}/release-artifact/*
           if-no-files-found: error
           retention-days: 90
           overwrite: true
@@ -356,13 +364,22 @@ jobs:
           cd "$RUNNER_TEMP/release"
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             mkdir -p existing
-            for evidence in release-images.json release-images.env combined-restore.json; do
+            for evidence in release-images.json release-images.env; do
               if gh release download "$GITHUB_REF_NAME" --pattern "$evidence" --dir existing >/dev/null 2>&1; then
                 cmp --silent "$evidence" "existing/$evidence"
               else
                 gh release upload "$GITHUB_REF_NAME" "$evidence"
               fi
             done
+            if gh release download "$GITHUB_REF_NAME" --pattern combined-restore.json --dir existing >/dev/null 2>&1; then
+              if ! cmp --silent combined-restore.json existing/combined-restore.json; then
+                rerun_evidence="combined-restore-run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}.json"
+                cp combined-restore.json "$rerun_evidence"
+                gh release upload "$GITHUB_REF_NAME" "$rerun_evidence"
+              fi
+            else
+              gh release upload "$GITHUB_REF_NAME" combined-restore.json
+            fi
             gh release edit "$GITHUB_REF_NAME" --draft=false --latest
           else
             gh release create "$GITHUB_REF_NAME" \

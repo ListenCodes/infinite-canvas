@@ -12,7 +12,7 @@ services:
       interval: 3s
       timeout: 3s
       retries: 30
-    networks: [recovery]
+    networks: [recovery-data]
 
   hatchet-db:
     image: postgres:15.18-bookworm@sha256:e8db9bd3e9e1751eb639fb17be53cc6d1b62a322adf75b99e791767a7a16ce69
@@ -27,7 +27,7 @@ services:
       interval: 3s
       timeout: 3s
       retries: 30
-    networks: [recovery]
+    networks: [hatchet-control]
 
   moto:
     image: motoserver/moto:5.2.2@sha256:d8ae5edc2bf080e7e4c13f9bd4b29b53ac3b4427e92956318db3dbe23ec43eb7
@@ -40,7 +40,7 @@ services:
       interval: 3s
       timeout: 3s
       retries: 30
-    networks: [recovery]
+    networks: [recovery-data]
 
   hatchet-lite:
     image: ghcr.io/hatchet-dev/hatchet/hatchet-lite:v0.101.12@sha256:57bea9aa918c50c799122789ebbee9eb99a540df1d6e2a31f2dbbb87dec65fa3
@@ -68,7 +68,7 @@ services:
       timeout: 3s
       retries: 60
       start_period: 15s
-    networks: [recovery]
+    networks: [hatchet-control, hatchet-api]
 
   database-migrate:
     profiles: ["tools"]
@@ -82,7 +82,7 @@ services:
     tmpfs: ["/tmp:rw,noexec,nosuid,size=128m"]
     cap_drop: ["ALL"]
     security_opt: ["no-new-privileges:true"]
-    networks: [recovery]
+    networks: [recovery-data]
 
   database-provision-roles:
     profiles: ["tools"]
@@ -103,7 +103,7 @@ services:
     tmpfs: ["/tmp:rw,noexec,nosuid,size=128m"]
     cap_drop: ["ALL"]
     security_opt: ["no-new-privileges:true"]
-    networks: [recovery]
+    networks: [recovery-data]
 
   recovery-audit:
     profiles: ["recovery"]
@@ -126,7 +126,40 @@ services:
     tmpfs: ["/tmp:rw,noexec,nosuid,size=128m"]
     cap_drop: ["ALL"]
     security_opt: ["no-new-privileges:true"]
-    networks: [recovery]
+    networks: [recovery-data]
+
+  hatchet-terminal-observer:
+    profiles: ["recovery"]
+    image: ${WORKER_IMAGE:-infinite-canvas-worker:gate}
+    command: ["node", "/run/recovery-entry.mjs"]
+    environment:
+      RECOVERY_PROBE_STATE_PATH: /run/probe-state/terminal-run.json
+      HATCHET_CLIENT_TOKEN_FILE: /run/secrets/hatchet-client-token
+      HATCHET_CLIENT_HOST_PORT: hatchet-lite:7077
+      HATCHET_CLIENT_API_URL: http://hatchet-lite:8888
+    depends_on:
+      hatchet-lite: { condition: service_healthy }
+    volumes:
+      - type: bind
+        source: ${RECOVERY_PROBE_ENTRY_PATH:?required}
+        target: /run/recovery-entry.mjs
+        read_only: true
+      - type: bind
+        source: ${RECOVERY_PROBE_EVIDENCE_PATH:?required}
+        target: /run/hatchet-terminal-evidence.mjs
+        read_only: true
+      - type: bind
+        source: ${RECOVERY_PROBE_STATE_DIRECTORY:?required}
+        target: /run/probe-state
+        read_only: true
+    secrets:
+      - source: recovery-hatchet-client-token
+        target: hatchet-client-token
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=128m"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    networks: [hatchet-api]
 
 volumes:
   business-data: {}
@@ -134,4 +167,10 @@ volumes:
   hatchet-config: {}
 
 networks:
-  recovery: { internal: true }
+  recovery-data: { internal: true }
+  hatchet-control: { internal: true }
+  hatchet-api: { internal: true }
+
+secrets:
+  recovery-hatchet-client-token:
+    file: ${RECOVERY_HATCHET_TOKEN_FILE:?required}

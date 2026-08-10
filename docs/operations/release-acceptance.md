@@ -28,12 +28,13 @@ operator/reviewer, procedure or test name, evidence URI, result, and limitations
 | 15 | Combined restore | Business DB, objects, Hatchet state restored and every current job reconciled |
 
 Row 15 has three explicit evidence tiers. The release-gate CI tier runs
-`npm run recovery:drill` with the synthetic control-plane marker and proves the
+`npm run recovery:drill` with a real terminal Hatchet Lite run and proves the
 repeatable source-to-empty-target restore mechanics, RLS/read-only roles, ledger
 and reservation invariants, full object-version history, Hatchet schema/config,
-and business-job reconciliation. A release candidate must additionally restore and
-query a recorded terminal run through the selected Hatchet OSS backup or managed
-recovery procedure. Production promotion also requires a separately recorded restore from the selected managed
+and business-job reconciliation against that same run through REST and gRPC. A
+release candidate must repeat the restore through the selected Hatchet OSS backup
+or managed recovery procedure. Production promotion also requires a separately
+recorded restore from the selected managed
 Supabase/object-storage backups and the selected Hatchet Cloud retention/export or
 OSS backup path. A lower tier must never be reported as satisfying a higher tier.
 
@@ -57,7 +58,7 @@ The commit containing this section has the following local evidence on 2026-08-1
   assets without deleting the original local archive.
 - Root and Web type checks and production builds pass. Root and Web production
   dependency audits report zero known vulnerabilities. Deployment/recovery policy
-  tests pass 23 scenarios, and the deployment, recovery-boundary, Web bundle secret,
+  tests pass 29 scenarios, and the deployment, recovery-boundary, Web bundle secret,
   isolated-browser storage secret, and diff checks pass.
 - Capacity tests cover v1/v2 contract separation, immutable attempt snapshots,
   old-prefix migration backfill, append-only channel policy, workspace 3/2 and
@@ -102,8 +103,12 @@ The commit containing this section has the following local evidence on 2026-08-1
 - Tag publication first persists one three-image release set in a draft GitHub
   Release, then promotes immutable tags from that set. The combined recovery evidence
   is regenerated against the exact API/Worker digests, records the manifest checksum
-  and all three image references, and is retained with the published Release. Cloud
-  and OSS include validated old/new Worker drain overlays whose dispatcher and
+  and all three image references, and requires the same real terminal Hatchet run,
+  task identity, terminal timestamp, and input/output hashes before and after the
+  control-plane restore. Promotion always executes a fresh drill; workflow reruns
+  append attempt-qualified evidence and never treat an existing Release JSON asset
+  as proof of execution. Evidence is retained with the published Release. Cloud and OSS
+  include validated old/new Worker drain overlays whose dispatcher and
   reconciler flags must each have exactly one owner outside the intentional zero-owner
   handoff interval.
 

@@ -1,5 +1,6 @@
 import { readdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { parse } from "yaml";
 
 const argumentsList = process.argv.slice(2);
 const envFileArguments = [];
@@ -173,8 +174,10 @@ const recoveryCompose = await readFile(resolve(repository, "infra/compose/recove
 for (const forbidden of ["extra_hosts:", "  api:", "  worker:", "OUTBOX_DISPATCHER_ENABLED", "UNKNOWN_RECONCILER_ENABLED"]) {
   if (recoveryCompose.includes(forbidden)) errors.push(`infra/compose/recovery/compose.yaml: forbidden recovery boundary ${forbidden}`);
 }
-if (!/recovery:\s*\{\s*internal:\s*true\s*\}/.test(recoveryCompose)) {
-  errors.push("infra/compose/recovery/compose.yaml: recovery network must be internal");
+const recoveryTopology = parse(recoveryCompose);
+const recoveryNetworks = Object.entries(recoveryTopology?.networks ?? {});
+if (recoveryNetworks.length === 0 || recoveryNetworks.some(([, definition]) => definition?.internal !== true)) {
+  errors.push("infra/compose/recovery/compose.yaml: every recovery network must be internal");
 }
 
 const serviceImageWorkflow = await readFile(resolve(repository, ".github/workflows/docker-image.yml"), "utf8");

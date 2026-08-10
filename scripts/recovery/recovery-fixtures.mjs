@@ -51,6 +51,7 @@ export const fixtureIds = Object.freeze({
   releaseFailedBEntry: "10000000-0000-4000-8000-000000001105",
   reserveRedispatchEntry: "10000000-0000-4000-8000-000000001106",
   reserveClaimedRedispatchEntry: "10000000-0000-4000-8000-000000001107",
+  releaseActiveEntry: "10000000-0000-4000-8000-000000001108",
   eventSucceeded: "10000000-0000-4000-8000-000000001201",
   eventFailedB: "10000000-0000-4000-8000-000000001202",
 });
@@ -58,7 +59,6 @@ export const fixtureIds = Object.freeze({
 export const fixtureBucket = "infinite-canvas-recovery";
 export const fixtureObjectKey = `${fixtureIds.workspaceA}/image/${fixtureIds.succeededJob}/${fixtureIds.succeededAttempt}/original`;
 export const fixtureConditionalObjectKey = fixtureObjectKey;
-export const fixtureProbeRunId = "recovery-probe-run-1";
 export const fixturePng = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
   "base64",
@@ -137,7 +137,8 @@ async function verifyConditionalObjectWrite(storage) {
   };
 }
 
-export async function seedRecoveryFixtures({ businessUrl, hatchetUrl, s3Endpoint, probeRunId = fixtureProbeRunId }) {
+export async function seedRecoveryFixtures({ businessUrl, s3Endpoint, terminalRunId }) {
+  if (typeof terminalRunId !== "string" || terminalRunId.length === 0) throw new Error("A terminal Hatchet run ID is required");
   const storage = createRecoveryS3(s3Endpoint);
   await storage.send(new CreateBucketCommand({ Bucket: fixtureBucket }));
   await storage.send(new PutBucketVersioningCommand({
@@ -260,6 +261,7 @@ export async function seedRecoveryFixtures({ businessUrl, hatchetUrl, s3Endpoint
       await transaction`select app.reserve_credits(${fixtureIds.succeededReservation}, ${fixtureIds.reserveSucceededEntry}, ${fixtureIds.workspaceA}, ${fixtureIds.succeededJob}, ${fixtureIds.succeededAttempt}, 10, now() + interval '24 hours')`;
       await transaction`select app.settle_reservation(${fixtureIds.succeededAttempt}, ${fixtureIds.settleSucceededEntry})`;
       await transaction`select app.reserve_credits(${fixtureIds.activeReservation}, ${fixtureIds.reserveActiveEntry}, ${fixtureIds.workspaceA}, ${fixtureIds.activeJob}, ${fixtureIds.activeAttempt}, 10, now() + interval '24 hours')`;
+      await transaction`select app.release_reservation(${fixtureIds.activeAttempt}, ${fixtureIds.releaseActiveEntry}, 'recovery_fixture_canceled')`;
       await transaction`select app.reserve_credits(${fixtureIds.redispatchReservation}, ${fixtureIds.reserveRedispatchEntry}, ${fixtureIds.workspaceA}, ${fixtureIds.redispatchJob}, ${fixtureIds.redispatchAttempt}, 10, now() + interval '24 hours')`;
       await transaction`select app.reserve_credits(${fixtureIds.claimedRedispatchReservation}, ${fixtureIds.reserveClaimedRedispatchEntry}, ${fixtureIds.workspaceA}, ${fixtureIds.claimedRedispatchJob}, ${fixtureIds.claimedRedispatchAttempt}, 10, now() + interval '24 hours')`;
       await transaction`select app.reserve_credits(${fixtureIds.failedReservationB}, ${fixtureIds.reserveFailedBEntry}, ${fixtureIds.workspaceB}, ${fixtureIds.failedJobB}, ${fixtureIds.failedAttemptB}, 10, now() + interval '24 hours')`;
@@ -269,7 +271,7 @@ export async function seedRecoveryFixtures({ businessUrl, hatchetUrl, s3Endpoint
         values (${fixtureIds.asset}, ${fixtureIds.workspaceA}, 'image', 'ready', ${fixtureObjectKey}, 'image/png', ${fixturePng.byteLength}, ${sha256(fixturePng)})
       `;
       await transaction`
-        update generation_attempts set status = 'succeeded', completed_at = now()
+        update generation_attempts set status = 'succeeded', completed_at = now(), executor_run_id = ${terminalRunId}
         where id = ${fixtureIds.succeededAttempt}
       `;
       await transaction`
@@ -278,12 +280,11 @@ export async function seedRecoveryFixtures({ businessUrl, hatchetUrl, s3Endpoint
       `;
       await transaction`
         update generation_attempts
-        set status = 'accepted', provider_task_id = 'recovery-provider-task-1',
-            executor_run_id = ${probeRunId}, submitted_at = now()
+        set status = 'canceled', completed_at = now(), error_code = 'recovery_fixture_canceled'
         where id = ${fixtureIds.activeAttempt}
       `;
       await transaction`
-        update generation_jobs set status = 'waiting_provider', version = 1
+        update generation_jobs set status = 'canceled', version = 1, terminal_at = now()
         where id = ${fixtureIds.activeJob}
       `;
       await transaction`
@@ -325,24 +326,6 @@ export async function seedRecoveryFixtures({ businessUrl, hatchetUrl, s3Endpoint
     storage.destroy();
   }
 
-  const hatchet = postgres(hatchetUrl, { max: 1, prepare: false });
-  try {
-    await hatchet`
-      create table if not exists recovery_drill_probe_runs (
-        run_id text primary key,
-        status text not null,
-        workflow_name text not null,
-        created_at timestamptz not null default now()
-      )
-    `;
-    await hatchet`
-      insert into recovery_drill_probe_runs (run_id, status, workflow_name)
-      values (${probeRunId}, 'running', 'media-generation-v1')
-      on conflict (run_id) do update set status = excluded.status, workflow_name = excluded.workflow_name
-    `;
-  } finally {
-    await hatchet.end();
-  }
   return { objectStorageConditionalWrite };
 }
 
@@ -485,7 +468,7 @@ export async function verifyRestoredAccess({ adminUrl, apiUrl, recoveryUrl }) {
           (select count(*)::int from wallet_entries) as ledger
       `;
     });
-    const expectedVisibility = { projects: 1, assets: 1, jobs: 4, events: 1, wallets: 1, ledger: 5 };
+    const expectedVisibility = { projects: 1, assets: 1, jobs: 4, events: 1, wallets: 1, ledger: 6 };
     if (JSON.stringify(visibility[0]) !== JSON.stringify(expectedVisibility)) {
       throw new Error("Restored API role failed tenant-isolation verification");
     }
@@ -550,9 +533,23 @@ export function classifyRestoredJob(job, probeById) {
     canceled: "canceled",
   }[job.status];
   if (terminalAttempt) {
-    return terminalAttempt === job.attempt_status
-      ? { jobId: job.id, classification: "business_terminal", status: job.status }
-      : { jobId: job.id, classification: "unreconciled", status: job.status, reason: "terminal_attempt_mismatch" };
+    if (terminalAttempt !== job.attempt_status) {
+      return { jobId: job.id, classification: "unreconciled", status: job.status, reason: "terminal_attempt_mismatch" };
+    }
+    if (terminalAttempt === "succeeded") {
+      if (!job.executor_run_id) return { jobId: job.id, classification: "unreconciled", status: job.status, reason: "missing_executor_run" };
+      const probe = probeById.get(job.executor_run_id);
+      if (!probe || String(probe.status).toLowerCase() !== "completed" || probe.workflow_name !== "infinite-canvas-recovery-terminal-probe-v1") {
+        return {
+          jobId: job.id,
+          classification: "unreconciled",
+          status: job.status,
+          reason: !probe ? "missing_control_plane_run" : "control_plane_state_mismatch",
+        };
+      }
+      return { jobId: job.id, classification: "business_terminal_with_control_plane_run", status: job.status };
+    }
+    return { jobId: job.id, classification: "business_terminal", status: job.status };
   }
   const allowedAttemptStatuses = {
     queued: ["created"],
@@ -612,14 +609,14 @@ export function classifyRestoredJob(job, probeById) {
   }
   return {
     jobId: job.id,
-    classification: "synthetic_control_plane_probe",
+    classification: "control_plane_run",
     status: job.status,
     probeStatus: probe.status,
     workflowName: probe.workflow_name,
   };
 }
 
-export async function reconcileRestoredJobs({ businessUrl, hatchetUrl }) {
+export async function reconcileRestoredJobs({ businessUrl, hatchetUrl, controlPlaneRuns }) {
   const business = postgres(businessUrl, { max: 1, prepare: false });
   const hatchet = postgres(hatchetUrl, { max: 1, prepare: false });
   try {
@@ -630,8 +627,10 @@ export async function reconcileRestoredJobs({ businessUrl, hatchetUrl }) {
       join generation_attempts attempt on attempt.id = job.current_attempt_id
       order by job.id
     `;
-    const probes = await hatchet`select run_id, status, workflow_name from recovery_drill_probe_runs order by run_id`;
-    const probeById = new Map(probes.map((probe) => [probe.run_id, probe]));
+    const probeById = new Map(controlPlaneRuns.map((probe) => [probe.runId, {
+      status: probe.status,
+      workflow_name: probe.taskName,
+    }]));
     const reconciliation = jobs.map((job) => classifyRestoredJob(job, probeById));
     if (reconciliation.some(({ classification }) => classification === "unreconciled")) {
       throw new Error("At least one restored current job could not be reconciled");

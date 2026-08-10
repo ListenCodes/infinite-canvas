@@ -46,8 +46,8 @@ docker compose --env-file /secure/path/runtime.env -f infra/compose/cloud/compos
 
 Before promoting a release candidate, run the combined source-to-empty-target
 restore described in `docs/operations/backup-restore.md`. CI runs its repeatable
-synthetic control-plane tier automatically; an actual terminal Hatchet probe and
-the selected managed-service recovery exercises remain production evidence gates.
+real terminal Hatchet Lite tier automatically; the selected OSS/managed-service
+recovery exercises remain production evidence gates.
 
 ## Database initialization
 
@@ -91,8 +91,12 @@ published Release with both manifest files as ready; candidate tags and a draft
 Release are not a deployment signal.
 The combined-restore drill is then rerun against the exact API and Worker digest
 references from that manifest. Its redacted evidence records the manifest SHA-256
-and all three image references, and `combined-restore.json` is retained with the
-published Release instead of relying on the short-lived Actions artifact alone.
+and all three image references, plus one real terminal Hatchet run observed before
+and after restoration through both REST and gRPC. Every promotion attempt executes
+a fresh drill. The first report keeps the canonical `combined-restore.json` name;
+a later successful rerun appends an attempt-qualified report instead of replacing
+prior evidence. Reports are retained with the published Release instead of relying
+on the short-lived Actions artifact alone.
 
 For OSS, Compose waits for `hatchet-engine:/ready` and
 `hatchet-dashboard:/api/ready` before starting the Worker. The dashboard embeds
