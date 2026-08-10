@@ -21,6 +21,7 @@ CREATE TABLE "provider_channel_capacity_policies" (
 	CONSTRAINT "provider_channel_capacity_policies_positive" CHECK ("provider_channel_capacity_policies"."version" > 0 and "provider_channel_capacity_policies"."concurrency_limit" > 0 and "provider_channel_capacity_policies"."rate_limit_per_minute" > 0)
 );
 --> statement-breakpoint
+ALTER TABLE "provider_channels" NO FORCE ROW LEVEL SECURITY;--> statement-breakpoint
 ALTER TABLE "model_configs" NO FORCE ROW LEVEL SECURITY;--> statement-breakpoint
 ALTER TABLE "generation_jobs" NO FORCE ROW LEVEL SECURITY;--> statement-breakpoint
 ALTER TABLE "generation_attempts" NO FORCE ROW LEVEL SECURITY;--> statement-breakpoint
@@ -141,6 +142,7 @@ ALTER TABLE "provider_channel_capacity_policies" ADD CONSTRAINT "provider_channe
 CREATE INDEX "provider_channel_capacity_leases_expiry_idx" ON "provider_channel_capacity_leases" USING btree ("channel_id","capability","lease_expires_at");--> statement-breakpoint
 CREATE INDEX "provider_channel_capacity_policies_latest_idx" ON "provider_channel_capacity_policies" USING btree ("channel_id","capability","version");--> statement-breakpoint
 ALTER TABLE "generation_attempts" ADD CONSTRAINT "generation_attempts_capacity_positive" CHECK ("generation_attempts"."capacity_policy_version" > 0 and "generation_attempts"."workspace_concurrency_limit" > 0 and "generation_attempts"."workspace_rate_limit_per_minute" > 0 and "generation_attempts"."channel_concurrency_limit" > 0 and "generation_attempts"."channel_rate_limit_per_minute" > 0);--> statement-breakpoint
+ALTER TABLE "provider_channels" FORCE ROW LEVEL SECURITY;--> statement-breakpoint
 ALTER TABLE "model_configs" FORCE ROW LEVEL SECURITY;--> statement-breakpoint
 ALTER TABLE "generation_jobs" FORCE ROW LEVEL SECURITY;--> statement-breakpoint
 ALTER TABLE "generation_attempts" FORCE ROW LEVEL SECURITY;--> statement-breakpoint

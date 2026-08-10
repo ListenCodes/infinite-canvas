@@ -627,10 +627,10 @@ test("capacity migrations backfill an existing release prefix and restore FORCE 
     });
     const forced = await db.query<{ count: number }>(`
       select count(*)::int as count from pg_class
-      where relname in ('model_configs', 'generation_jobs', 'generation_attempts', 'outbox_events')
+      where relname in ('provider_channels', 'model_configs', 'generation_jobs', 'generation_attempts', 'outbox_events')
         and relforcerowsecurity
     `);
-    assert.equal(forced.rows[0]?.count, 4);
+    assert.equal(forced.rows[0]?.count, 5);
   } finally {
     await db.close();
   }

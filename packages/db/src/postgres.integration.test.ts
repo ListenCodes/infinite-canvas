@@ -177,6 +177,7 @@ test("real PostgreSQL enforces migrations, runtime roles, RLS, and LISTEN/NOTIFY
       profiles_force: boolean;
       members_force: boolean;
       projects_force: boolean;
+      provider_channels_force: boolean;
       policies_force: boolean;
       leases_force: boolean;
       rate_windows_force: boolean;
@@ -186,6 +187,7 @@ test("real PostgreSQL enforces migrations, runtime roles, RLS, and LISTEN/NOTIFY
              (select relforcerowsecurity from pg_class where oid = 'profiles'::regclass) as profiles_force,
              (select relforcerowsecurity from pg_class where oid = 'workspace_members'::regclass) as members_force,
              (select relforcerowsecurity from pg_class where oid = 'projects'::regclass) as projects_force,
+             (select relforcerowsecurity from pg_class where oid = 'provider_channels'::regclass) as provider_channels_force,
              (select relforcerowsecurity from pg_class where oid = 'provider_channel_capacity_policies'::regclass) as policies_force,
              (select relforcerowsecurity from pg_class where oid = 'provider_channel_capacity_leases'::regclass) as leases_force,
              (select relforcerowsecurity from pg_class where oid = 'generation_capacity_rate_windows'::regclass) as rate_windows_force
@@ -200,6 +202,7 @@ test("real PostgreSQL enforces migrations, runtime roles, RLS, and LISTEN/NOTIFY
       profiles_force: false,
       members_force: false,
       projects_force: true,
+      provider_channels_force: true,
       policies_force: true,
       leases_force: true,
       rate_windows_force: true,
