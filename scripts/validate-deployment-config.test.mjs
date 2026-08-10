@@ -192,3 +192,18 @@ test("release gate builds recovery images before the drill and uploads exact evi
     "retention-days": 14,
   });
 });
+
+test("release gate scans all browser storage layers with exact platform canaries", async () => {
+  const content = await readFile(resolve(repository, ".github/workflows/release-gate.yml"), "utf8");
+  const workflow = parse(content);
+  const steps = workflow.jobs?.quality?.steps;
+  assert.ok(Array.isArray(steps));
+  const buildIndex = steps.findIndex(({ name }) => name === "Verify Web");
+  const storageIndex = steps.findIndex(({ name }) => name === "Verify browser storage secret boundary");
+  assert.ok(buildIndex >= 0 && storageIndex > buildIndex);
+  assert.equal(steps[storageIndex].run, "npm run verify:browser-storage-boundary");
+  assert.equal(
+    steps[storageIndex].env?.SECRET_SCAN_CANARIES,
+    "release-gate-service-secret-0001,release-gate-hatchet-secret-0002,release-gate-credential-secret-0003",
+  );
+});

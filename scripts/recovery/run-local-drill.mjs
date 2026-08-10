@@ -255,7 +255,7 @@ async function main() {
       await publishedPort(targetProject, targetEnvironment, "moto", 5000),
     );
     await compose(sourceProject, sourceEnvironment, ["run", "--rm", "database-migrate"], "Migrate source business database");
-    await seedRecoveryFixtures({
+    const sourceValidation = await seedRecoveryFixtures({
       businessUrl: businessUrl(sourcePorts),
       hatchetUrl: hatchetUrl(sourcePorts),
       s3Endpoint: s3Endpoint(sourcePorts),
@@ -328,7 +328,7 @@ async function main() {
     const completedAt = new Date();
     const evidence = {
       schemaVersion: 1,
-      procedureVersion: 2,
+      procedureVersion: 3,
       mode: "local_combined_restore_with_synthetic_control_plane_probe",
       candidate: {
         sourceSha,
@@ -345,6 +345,7 @@ async function main() {
         providerEgressConfigured: false,
         networkInternal: true,
       },
+      sourceValidation,
       backups: {
         businessDatabaseSha256: sha256(await readFile(businessDump)),
         hatchetDatabaseSha256: sha256(await readFile(hatchetDump)),

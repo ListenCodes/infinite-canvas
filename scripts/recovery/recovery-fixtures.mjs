@@ -6,6 +6,7 @@ import {
   CreateBucketCommand,
   DeleteObjectCommand,
   GetObjectCommand,
+  HeadObjectCommand,
   ListObjectVersionsCommand,
   PutBucketVersioningCommand,
   PutObjectCommand,
@@ -55,7 +56,8 @@ export const fixtureIds = Object.freeze({
 });
 
 export const fixtureBucket = "infinite-canvas-recovery";
-export const fixtureObjectKey = `${fixtureIds.workspaceA}/generated/${fixtureIds.succeededAttempt}.png`;
+export const fixtureObjectKey = `${fixtureIds.workspaceA}/image/${fixtureIds.succeededJob}/${fixtureIds.succeededAttempt}/original`;
+export const fixtureConditionalObjectKey = fixtureObjectKey;
 export const fixtureProbeRunId = "recovery-probe-run-1";
 export const fixturePng = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
@@ -86,6 +88,55 @@ async function pauseForVersionOrdering() {
   await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
 }
 
+async function verifyConditionalObjectWrite(storage) {
+  const firstBody = Buffer.from("immutable-first-write", "utf8");
+  const secondBody = Buffer.from("conflicting-second-write", "utf8");
+  const firstSha256 = sha256(firstBody);
+  await storage.send(new PutObjectCommand({
+    Bucket: fixtureBucket,
+    Key: fixtureConditionalObjectKey,
+    Body: firstBody,
+    ContentType: "application/octet-stream",
+    Metadata: { sha256: firstSha256, fixture: "conditional-write" },
+    IfNoneMatch: "*",
+  }));
+  let conflictStatus;
+  try {
+    await storage.send(new PutObjectCommand({
+      Bucket: fixtureBucket,
+      Key: fixtureConditionalObjectKey,
+      Body: secondBody,
+      ContentType: "application/octet-stream",
+      Metadata: { sha256: sha256(secondBody), fixture: "conditional-write-conflict" },
+      IfNoneMatch: "*",
+    }));
+  } catch (error) {
+    conflictStatus = error?.$metadata?.httpStatusCode;
+    if (conflictStatus !== 412) throw error;
+  }
+  if (conflictStatus !== 412)
+    throw new Error("S3-compatible service accepted a conflicting conditional object write");
+  const head = await storage.send(new HeadObjectCommand({
+    Bucket: fixtureBucket,
+    Key: fixtureConditionalObjectKey,
+  }));
+  if (
+    head.ContentLength !== firstBody.byteLength ||
+    head.ContentType !== "application/octet-stream" ||
+    head.Metadata?.sha256 !== firstSha256 ||
+    head.Metadata?.fixture !== "conditional-write"
+  ) {
+    throw new Error("S3-compatible service did not preserve immutable object metadata");
+  }
+  return {
+    key: fixtureConditionalObjectKey,
+    firstWriteSha256: firstSha256,
+    bytes: firstBody.byteLength,
+    mime: "application/octet-stream",
+    conflictingWriteStatus: conflictStatus,
+  };
+}
+
 export async function seedRecoveryFixtures({ businessUrl, hatchetUrl, s3Endpoint, probeRunId = fixtureProbeRunId }) {
   const storage = createRecoveryS3(s3Endpoint);
   await storage.send(new CreateBucketCommand({ Bucket: fixtureBucket }));
@@ -93,6 +144,7 @@ export async function seedRecoveryFixtures({ businessUrl, hatchetUrl, s3Endpoint
     Bucket: fixtureBucket,
     VersioningConfiguration: { Status: "Enabled" },
   }));
+  const objectStorageConditionalWrite = await verifyConditionalObjectWrite(storage);
   await storage.send(new PutObjectCommand({
     Bucket: fixtureBucket,
     Key: fixtureObjectKey,
@@ -291,6 +343,7 @@ export async function seedRecoveryFixtures({ businessUrl, hatchetUrl, s3Endpoint
   } finally {
     await hatchet.end();
   }
+  return { objectStorageConditionalWrite };
 }
 
 export async function exportObjectVersions(client, bucket, directory) {

@@ -49,6 +49,10 @@ jobs:
         env:
           SECRET_SCAN_CANARIES: release-gate-service-secret-0001,release-gate-hatchet-secret-0002,release-gate-credential-secret-0003
         run: node scripts/verify-web-secret-boundary.mjs web/dist
+      - name: Verify browser storage secret boundary
+        env:
+          SECRET_SCAN_CANARIES: release-gate-service-secret-0001,release-gate-hatchet-secret-0002,release-gate-credential-secret-0003
+        run: npm run verify:browser-storage-boundary
 
   postgres-integration:
     runs-on: ubuntu-24.04

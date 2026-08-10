@@ -31,6 +31,16 @@ test("object reconciliation compares content history without provider version id
   ]);
 });
 
+test("recovery drill validates conditional S3 writes through the real SDK path", async () => {
+  const fixtures = await readFile(resolve(repository, "scripts/recovery/recovery-fixtures.mjs"), "utf8");
+  const drill = await readFile(resolve(repository, "scripts/recovery/run-local-drill.mjs"), "utf8");
+  assert.match(fixtures, /IfNoneMatch: "\*"/);
+  assert.match(fixtures, /conflictStatus !== 412/);
+  assert.match(fixtures, /new HeadObjectCommand/);
+  assert.match(drill, /const sourceValidation = await seedRecoveryFixtures/);
+  assert.match(drill, /sourceValidation,/);
+});
+
 test("restored job reconciliation requires compatible business and control-plane state", () => {
   const probeById = new Map([["run-1", { status: "running", workflow_name: "media-generation-v1" }]]);
   assert.equal(classifyRestoredJob({ id: "job-1", status: "waiting_provider", attempt_status: "accepted", executor_run_id: "run-1", provider_task_id: "provider-1", submitted_at: new Date() }, probeById).classification, "synthetic_control_plane_probe");

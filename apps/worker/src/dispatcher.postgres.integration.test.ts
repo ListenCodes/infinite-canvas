@@ -874,22 +874,84 @@ test(
         await transaction`select set_config('app.service_role', 'on', true)`;
         return transaction<{
           attempt_status: string;
+          dispatch_token: string;
           job_status: string;
           reservation_status: string;
           recovery_outbox: number;
         }[]>`
           select
             (select status::text from generation_attempts where id = ${knownProviderUnknown.attempt_id}) as attempt_status,
+            (select executor_dispatch_token::text from generation_attempts where id = ${knownProviderUnknown.attempt_id}) as dispatch_token,
             (select status::text from generation_jobs where id = ${knownProviderUnknown.job_id}) as job_status,
             (select status::text from credit_reservations where attempt_id = ${knownProviderUnknown.attempt_id}) as reservation_status,
             (select count(*)::int from outbox_events where dedupe_key = ${`generation.job.unknown-recovered:${knownProviderUnknown.attempt_id}`} and status = 'pending') as recovery_outbox
         `;
       });
-      assert.deepEqual(recoveredProviderTask[0], {
+      const { dispatch_token: recoveryDispatchToken, ...recoveredState } =
+        recoveredProviderTask[0]!;
+      assert.match(recoveryDispatchToken, /^[0-9a-f-]{36}$/);
+      assert.deepEqual(recoveredState, {
         attempt_status: "materializing",
         job_status: "materializing",
         reservation_status: "reserved",
         recovery_outbox: 1,
+      });
+
+      let recoveryMaterializations = 0;
+      const recoveredAsset = {
+        objectKey: `${workspaceId}/image/${knownProviderUnknown.job_id}/${knownProviderUnknown.attempt_id}.png`,
+        mime: "image/png",
+        bytes: 321n,
+        sha256: "a".repeat(64),
+        kind: "image" as const,
+      };
+      const recoveryExecutor = new GenerationExecutor(reconciliationRepository, {
+        async recoverMaterialized() {
+          return undefined;
+        },
+        async materialize() {
+          recoveryMaterializations += 1;
+          return recoveredAsset;
+        },
+      });
+      const recoveryResult = await recoveryExecutor.execute(knownProviderInput, {
+        workflowRunId: "unknown-provider-recovery-finalize",
+        dispatchToken: recoveryDispatchToken,
+        signal: new AbortController().signal,
+      });
+      assert.equal(recoveryResult.outcome, "succeeded");
+      assert.equal(recoveryMaterializations, 1);
+      assert.equal(providerPolls, 1);
+      assert.equal(providerSubmits, 0);
+
+      const recoveredCompletion = await sql.begin(async (transaction) => {
+        await transaction`select set_config('app.service_role', 'on', true)`;
+        return transaction<
+          {
+            assets: number;
+            asset_events: number;
+            attempt_status: string;
+            job_status: string;
+            reservation_status: string;
+            settlements: number;
+          }[]
+        >`
+          select
+            (select count(*)::int from assets where object_key = ${recoveredAsset.objectKey}) as assets,
+            (select count(*)::int from generation_job_events where attempt_id = ${knownProviderUnknown.attempt_id} and type = 'generation.job.asset_ready') as asset_events,
+            (select status::text from generation_attempts where id = ${knownProviderUnknown.attempt_id}) as attempt_status,
+            (select status::text from generation_jobs where id = ${knownProviderUnknown.job_id}) as job_status,
+            (select status::text from credit_reservations where attempt_id = ${knownProviderUnknown.attempt_id}) as reservation_status,
+            (select count(*)::int from wallet_entries where reference_type = 'attempt' and reference_id = ${knownProviderUnknown.attempt_id} and kind = 'settle') as settlements
+        `;
+      });
+      assert.deepEqual(recoveredCompletion[0], {
+        assets: 1,
+        asset_events: 1,
+        attempt_status: "succeeded",
+        job_status: "succeeded",
+        reservation_status: "settled",
+        settlements: 1,
       });
     } finally {
       await sql.end();

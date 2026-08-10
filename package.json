@@ -22,7 +22,8 @@
     "recovery:audit": "npm run recovery:audit -w @infinite-canvas/worker",
     "recovery:drill": "node scripts/recovery/run-local-drill.mjs",
     "verify:recovery-boundary": "node scripts/verify-recovery-audit-boundary.mjs",
-    "test:deployment-config": "node --test scripts/validate-deployment-config.test.mjs scripts/recovery/recovery-fixtures.test.mjs",
+    "verify:browser-storage-boundary": "node scripts/verify-browser-storage-boundary.mjs",
+    "test:deployment-config": "node --test scripts/validate-deployment-config.test.mjs scripts/verify-browser-storage-boundary.test.mjs scripts/recovery/recovery-fixtures.test.mjs",
     "test:unit": "npm run test -w @infinite-canvas/contracts && npm run test -w @infinite-canvas/domain && npm run test -w @infinite-canvas/provider-adapters",
     "db:generate": "npm run generate -w @infinite-canvas/db",
     "db:migrate": "npm run migrate -w @infinite-canvas/db",
@@ -31,6 +32,7 @@
   },
   "devDependencies": {
     "@types/node": "24.13.3",
+    "playwright-core": "1.62.1",
     "postgres": "3.4.9",
     "tsx": "4.23.11",
     "typescript": "7.0.2",

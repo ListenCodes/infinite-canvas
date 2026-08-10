@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { once } from "node:events";
 import { createReadStream, createWriteStream } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -27,6 +28,17 @@ const extensions: Readonly<Record<string, string>> = {
   "video/mp4": "mp4",
   "video/webm": "webm",
 };
+
+interface GeneratedObjectIdentity {
+  workspaceId: string;
+  jobId: string;
+  attemptId: string;
+  capability: "image" | "video";
+}
+
+function generatedObjectKey(identity: GeneratedObjectIdentity): string {
+  return `${identity.workspaceId}/${identity.capability}/${identity.jobId}/${identity.attemptId}/original`;
+}
 
 function hasExpectedSignature(mime: string, chunk: Buffer): boolean {
   if (mime === "image/jpeg") return chunk[0] === 0xff && chunk[1] === 0xd8;
@@ -61,16 +73,18 @@ function httpStatus(error: unknown): number | undefined {
 export class ObjectStorage {
   readonly #client: S3Client;
 
-  constructor(private readonly config: WorkerConfig) {
-    this.#client = new S3Client({
-      region: config.S3_REGION,
-      endpoint: config.S3_ENDPOINT,
-      forcePathStyle: config.S3_FORCE_PATH_STYLE === "true",
-      credentials: {
-        accessKeyId: config.S3_ACCESS_KEY_ID,
-        secretAccessKey: config.S3_SECRET_ACCESS_KEY,
-      },
-    });
+  constructor(private readonly config: WorkerConfig, client?: S3Client) {
+    this.#client =
+      client ??
+      new S3Client({
+        region: config.S3_REGION,
+        endpoint: config.S3_ENDPOINT,
+        forcePathStyle: config.S3_FORCE_PATH_STYLE === "true",
+        credentials: {
+          accessKeyId: config.S3_ACCESS_KEY_ID,
+          secretAccessKey: config.S3_SECRET_ACCESS_KEY,
+        },
+      });
   }
 
   async signedReferenceUrl(objectKey: string): Promise<URL> {
@@ -114,12 +128,26 @@ export class ObjectStorage {
     );
   }
 
-  async recoverMaterialized(identity: {
-    workspaceId: string;
-    jobId: string;
-    attemptId: string;
-    capability: "image" | "video";
-  }): Promise<MaterializedAsset | undefined> {
+  async recoverMaterialized(
+    identity: GeneratedObjectIdentity,
+  ): Promise<MaterializedAsset | undefined> {
+    const canonicalKey = generatedObjectKey(identity);
+    try {
+      const recovered = await this.headGeneratedObject(
+        canonicalKey,
+        undefined,
+        identity.capability,
+      );
+      if (!recovered)
+        throw new Error(
+          "Canonical generated object exists without valid immutable media evidence",
+        );
+      return recovered;
+    } catch (error) {
+      if (httpStatus(error) !== 404) throw error;
+    }
+
+    const legacyObjects: MaterializedAsset[] = [];
     const candidates = Object.entries(extensions).filter(([mime]) =>
       mime.startsWith(`${identity.capability}/`),
     );
@@ -131,22 +159,25 @@ export class ObjectStorage {
           mime,
           identity.capability,
         );
-        if (recovered) return recovered;
+        if (!recovered)
+          throw new Error(
+            "Legacy generated object exists without valid immutable media evidence",
+          );
+        legacyObjects.push(recovered);
       } catch (error) {
         if (httpStatus(error) !== 404) throw error;
       }
     }
-    return undefined;
+    if (legacyObjects.length > 1)
+      throw new Error(
+        "Multiple legacy generated objects exist for one generation attempt",
+      );
+    return legacyObjects[0];
   }
 
   async materialize(
     source: URL,
-    identity: {
-      workspaceId: string;
-      jobId: string;
-      attemptId: string;
-      capability: "image" | "video";
-    },
+    identity: GeneratedObjectIdentity,
     provider: { baseUrl: URL; credential: string; signal: AbortSignal },
   ): Promise<MaterializedAsset> {
     if (source.protocol === "data:")
@@ -214,7 +245,7 @@ export class ObjectStorage {
         createWriteStream(mediaPath, { flags: "wx" }),
       );
       await this.validateFile(mediaPath, mime, identity.capability);
-      const objectKey = `${identity.workspaceId}/${identity.capability}/${identity.jobId}/${identity.attemptId}.${extension}`;
+      const objectKey = generatedObjectKey(identity);
       const sha256 = hash.digest("hex");
       return await this.putGeneratedObject(
         new PutObjectCommand({
@@ -242,12 +273,7 @@ export class ObjectStorage {
 
   private async materializeDataUrl(
     source: URL,
-    identity: {
-      workspaceId: string;
-      jobId: string;
-      attemptId: string;
-      capability: "image" | "video";
-    },
+    identity: GeneratedObjectIdentity,
     signal: AbortSignal,
   ): Promise<MaterializedAsset> {
     const match = /^data:([^;,]+);base64,(.+)$/s.exec(source.toString());
@@ -272,7 +298,7 @@ export class ObjectStorage {
     try {
       await writeFile(mediaPath, body, { flag: "wx" });
       await this.validateFile(mediaPath, mime, identity.capability);
-      const objectKey = `${identity.workspaceId}/${identity.capability}/${identity.jobId}/${identity.attemptId}.${extension}`;
+      const objectKey = generatedObjectKey(identity);
       const sha256 = createHash("sha256").update(body).digest("hex");
       return await this.putGeneratedObject(
         new PutObjectCommand({
@@ -305,46 +331,65 @@ export class ObjectStorage {
     signal: AbortSignal,
   ): Promise<MaterializedAsset> {
     try {
-      await this.#client.send(command, { abortSignal: signal });
-      return expected;
-    } catch (error) {
-      if (
-        httpStatus(error) !== 412 &&
-        !(error instanceof Error && error.name === "PreconditionFailed")
-      )
-        throw error;
-      const existing = await this.headGeneratedObject(
-        expected.objectKey,
-        expected.mime,
-        expected.kind,
-      );
-      if (!existing)
-        throw new Error(
-          "Generated object precondition failed but the existing object could not be verified",
+      try {
+        await this.#client.send(command, { abortSignal: signal });
+        return expected;
+      } catch (error) {
+        if (
+          httpStatus(error) !== 412 &&
+          !(error instanceof Error && error.name === "PreconditionFailed")
+        )
+          throw error;
+        const existing = await this.headGeneratedObject(
+          expected.objectKey,
+          expected.mime,
+          expected.kind,
         );
-      return existing;
+        if (
+          !existing ||
+          existing.sha256 !== expected.sha256 ||
+          existing.bytes !== expected.bytes ||
+          existing.mime !== expected.mime ||
+          existing.kind !== expected.kind
+        )
+          throw new Error(
+            "Generated object precondition failed and the existing object does not match the expected media",
+          );
+        return existing;
+      }
+    } finally {
+      if (command.input.Body instanceof Readable && !command.input.Body.closed) {
+        if (!command.input.Body.destroyed) command.input.Body.destroy();
+        await once(command.input.Body, "close");
+      }
     }
   }
 
   private async headGeneratedObject(
     objectKey: string,
-    fallbackMime: string,
+    expectedMime: string | undefined,
     kind: "image" | "video",
   ): Promise<MaterializedAsset | undefined> {
     const head = await this.#client.send(
       new HeadObjectCommand({ Bucket: this.config.S3_BUCKET, Key: objectKey }),
     );
     const sha256 = head.Metadata?.sha256;
+    const bytes = head.ContentLength;
+    const mime = head.ContentType?.split(";", 1)[0]?.toLowerCase();
     if (
       !sha256 ||
       !/^[a-f0-9]{64}$/.test(sha256) ||
-      typeof head.ContentLength !== "number"
+      typeof bytes !== "number" ||
+      !Number.isSafeInteger(bytes) ||
+      bytes <= 0 ||
+      bytes > this.config.MAX_MEDIA_BYTES ||
+      !mime ||
+      !extensions[mime] ||
+      (expectedMime !== undefined && mime !== expectedMime) ||
+      !mime.startsWith(`${kind}/`)
     )
       return undefined;
-    const mime =
-      head.ContentType?.split(";", 1)[0]?.toLowerCase() || fallbackMime;
-    if (!mime.startsWith(`${kind}/`)) return undefined;
-    return { objectKey, mime, bytes: BigInt(head.ContentLength), sha256, kind };
+    return { objectKey, mime, bytes: BigInt(bytes), sha256, kind };
   }
 
   private async validateFile(
