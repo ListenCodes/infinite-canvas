@@ -11,6 +11,7 @@ import { runModelPlugin } from "./model-plugin";
 import { resolveModelRuntimeAdapter, resolveModelRuntimeScript } from "./media-channel-presets";
 import { mediaChannelAdapterForVideoProfile } from "./media-model-adapters";
 import { grokMediaAspectRatio, grokMediaResolution, unwrapGrokMediaVideoResponse, type GrokMediaVideoResponse } from "./media-channel-video-contract";
+import { storeGeneratedVideoCore } from "./video-storage-core";
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
 
@@ -188,16 +189,13 @@ function videoPluginResult(result: unknown): VideoGenerationResult {
     throw new Error(apiText("scriptNoVideo"));
 }
 
-export async function storeGeneratedVideo(result: VideoGenerationResult): Promise<UploadedFile> {
-    if (result.blob) return uploadMediaFile(result.blob, "video");
-    if (result.url) {
-        try {
-            return await uploadMediaFile(result.url, "video");
-        } catch {
-            return { url: result.url, storageKey: "", bytes: 0, mimeType: result.mimeType || "video/mp4" };
-        }
+export async function storeGeneratedVideo(result: VideoGenerationResult, signal?: AbortSignal): Promise<UploadedFile> {
+    try {
+        return await storeGeneratedVideoCore(result, signal, uploadMediaFile);
+    } catch (error) {
+        if (!result.blob && !result.url) throw new Error(apiText("noPlayableVideo"));
+        throw error;
     }
-    throw new Error(apiText("noPlayableVideo"));
 }
 
 async function createOpenAIVideoTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], options?: RequestOptions): Promise<VideoGenerationTask> {
