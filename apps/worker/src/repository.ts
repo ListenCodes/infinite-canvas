@@ -461,7 +461,7 @@ export class GenerationRepository {
               attempt.executor_claim_id is null
               or (
                 attempt.executor_claim_id like 'unknown-reconcile:%'
-                and attempt.updated_at <= ${new Date(now.getTime() - 5 * 60_000)}
+                and attempt.updated_at <= now() - interval '5 minutes'
               )
             )
             and attempt.provider_task_id = ${providerTaskId}
