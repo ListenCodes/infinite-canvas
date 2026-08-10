@@ -224,7 +224,7 @@ async function seedDispatcherRecoveryFixture(sql: postgres.Sql): Promise<string>
 
 test(
   "dispatcher outage and concurrent recovery trigger each pending attempt once",
-  { skip: !adminUrl },
+  { skip: !adminUrl, timeout: 180_000 },
   async () => {
     assert.ok(adminUrl);
     const sql = postgres(runtimeUrl(adminUrl), { max: 6, prepare: false });
@@ -1288,7 +1288,12 @@ test(
           set executor_claim_id = 'unknown-reconcile:crashed', updated_at = now() - interval '6 minutes'
           where id = ${knownProviderUnknown.attempt_id}
         `;
-        return transaction<{ leases: number; covers_release: boolean; rate_used: number }[]>`
+        return transaction<{
+          leases: number;
+          covers_release: boolean;
+          rate_used: number;
+          reconcile_after: Date;
+        }[]>`
           select
             (select count(*)::int from provider_channel_capacity_leases
              where holder_id = ${knownProviderUnknown.attempt_id}) as leases,
@@ -1299,7 +1304,9 @@ test(
             (select used from generation_capacity_rate_windows
              where workspace_id = ${workspaceId} and channel_id is null
                and capability = ${knownProviderUnknown.capability}
-               and window_started_at = date_trunc('minute', now())) as rate_used
+               and window_started_at = date_trunc('minute', now())) as rate_used,
+            (select reconcile_after from generation_attempts
+             where id = ${knownProviderUnknown.attempt_id}) as reconcile_after
         `;
       });
       assert.equal(retainedUnknownLease[0]?.leases, 1);
@@ -1314,9 +1321,14 @@ test(
             ? reconciliationRepository.reconcileUnknownProviderTask(candidate, now)
             : Promise.resolve(false),
       );
-      const reconcileAt = new Date(Date.now() + 60 * 60 * 1000 + 1_000);
+      const reconcileAt = new Date(retainedUnknownLease[0]!.reconcile_after.getTime() + 1_000);
       const firstReconcile = providerReconciler.reconcileOnce(reconcileAt);
-      await providerPollStarted;
+      await Promise.race([
+        providerPollStarted,
+        firstReconcile.then(() => {
+          throw new Error("Unknown reconciliation completed before provider polling started");
+        }),
+      ]);
       assert.ok((await providerReconciler.reconcileOnce(reconcileAt)) >= 1);
       releaseProviderPoll();
       assert.ok((await firstReconcile) >= 1);
