@@ -18,6 +18,7 @@ migrationUrl.username = migrationRole;
 migrationUrl.password = migrationPassword;
 const admin = postgres(sourceUrl, { max: 1, prepare: false });
 const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
+const workspaceTimeoutMs = 5 * 60 * 1000;
 
 function run(workspace) {
   const result = spawnSync(
@@ -32,9 +33,17 @@ function run(workspace) {
         TEST_POSTGRES_MIGRATION_ROLE: migrationRole,
       },
       stdio: "inherit",
+      timeout: workspaceTimeoutMs,
+      killSignal: "SIGTERM",
     },
   );
-  if (result.error) throw result.error;
+  if (result.error) {
+    if (result.error.code === "ETIMEDOUT")
+      throw new Error(`${workspace} PostgreSQL integration tests exceeded ${workspaceTimeoutMs}ms`, {
+        cause: result.error,
+      });
+    throw result.error;
+  }
   if (result.status !== 0)
     throw new Error(`${workspace} PostgreSQL integration tests failed`);
 }

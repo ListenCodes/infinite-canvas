@@ -253,6 +253,7 @@ test(
 
     try {
       const workspaceId = await seedDispatcherRecoveryFixture(sql);
+      console.log("[worker-postgres] phase=fixture-seeded");
       const capacityRepository = new GenerationRepository(
         sql,
         config,
@@ -414,6 +415,7 @@ test(
         await transaction`delete from generation_attempts where id = ${capacityFixture.extraAttemptId}`;
         await transaction`delete from generation_jobs where id = ${capacityFixture.extraJobId}`;
       });
+      console.log("[worker-postgres] phase=capacity-fencing-verified");
 
       const before = await sql.begin(async (transaction) => {
         await transaction`select set_config('app.service_role', 'on', true)`;
@@ -536,6 +538,7 @@ test(
       assert.equal(acceptedAttempts.size, recovered[0]!.attempts);
       assert.equal(recovered[0]!.ledger, before[0]!.ledger);
       assert.ok([...acceptedTokens.values()].every((tokens) => tokens.size === 1));
+      console.log("[worker-postgres] phase=concurrent-dispatch-recovered");
 
       const staleOutbox = await sql.begin(async (transaction) => {
         await transaction`select set_config('app.service_role', 'on', true)`;
@@ -669,6 +672,7 @@ test(
         ledger_entries: staleOutbox.ledger_entries,
         event_count: staleOutbox.event_count,
       });
+      console.log("[worker-postgres] phase=stale-outbox-fenced");
 
       const unknownCandidate = await sql.begin(async (transaction) => {
         await transaction`select set_config('app.service_role', 'on', true)`;
@@ -889,6 +893,7 @@ test(
         `;
       });
       assert.deepEqual(lateSuccessAfter, lateSuccessBefore);
+      console.log("[worker-postgres] phase=unknown-timeout-verified");
 
       const materializing = await sql.begin(async (transaction) => {
         await transaction`select set_config('app.service_role', 'on', true)`;
@@ -1161,6 +1166,7 @@ test(
         reservation_status: "settled",
         attempt_status: "succeeded",
       });
+      console.log("[worker-postgres] phase=completion-replay-verified");
 
       const knownProviderUnknown = await sql.begin(async (transaction) => {
         await transaction`select set_config('app.service_role', 'on', true)`;
@@ -1312,6 +1318,7 @@ test(
       assert.equal(retainedUnknownLease[0]?.leases, 1);
       assert.equal(retainedUnknownLease[0]?.covers_release, true);
       const rateBeforeReconcile = retainedUnknownLease[0]!.rate_used;
+      console.log("[worker-postgres] phase=known-provider-reconcile-start");
       const providerReconciler = new UnknownOutcomeReconciler(
         sql,
         randomUUID,
@@ -1438,6 +1445,7 @@ test(
         reservation_status: "settled",
         settlements: 1,
       });
+      console.log("[worker-postgres] phase=known-provider-reconcile-complete");
     } finally {
       await sql.end();
     }

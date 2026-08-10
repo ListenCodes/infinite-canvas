@@ -750,6 +750,15 @@ test("PostgreSQL integration entrypoint builds workspace libraries in a fresh ch
   const rootPackage = JSON.parse(
     await readFile(resolve(repository, "package.json"), "utf8"),
   );
+  const runner = await readFile(
+    resolve(repository, "scripts/run-postgres-tests.mjs"),
+    "utf8",
+  );
+  const workflow = parse(
+    await readFile(resolve(repository, ".github/workflows/release-gate.yml"), "utf8"),
+  );
   assert.equal(rootPackage.scripts?.["pretest:postgres"], "npm run build:libs");
   assert.equal(rootPackage.scripts?.["test:postgres"], "node scripts/run-postgres-tests.mjs");
+  assert.match(runner, /timeout:\s*workspaceTimeoutMs/);
+  assert.equal(workflow.jobs?.["postgres-integration"]?.["timeout-minutes"], 12);
 });
