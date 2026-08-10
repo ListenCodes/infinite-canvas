@@ -64,13 +64,16 @@ export function canonicalizeTerminalRunObservation(runId, rest, details) {
   if (detailTask.externalId !== restTask.taskExternalId) throw new Error("REST and gRPC task IDs differ");
 
   const input = assertObject(restTask.input, "REST task input");
+  const logicalRestInput = typeof input.nonce === "string"
+    ? input
+    : assertObject(input.input, "REST standalone task input");
   const output = assertObject(restTask.output, "REST task output");
   const detailInput = assertObject(details.input, "gRPC run input");
   const detailOutput = assertObject(detailTask.output, "gRPC task output");
-  if (jsonHash(input) !== jsonHash(detailInput)) throw new Error("REST and gRPC inputs differ");
+  if (jsonHash(logicalRestInput) !== jsonHash(detailInput)) throw new Error("REST and gRPC inputs differ");
   if (jsonHash(output) !== jsonHash(detailOutput)) throw new Error("REST and gRPC outputs differ");
-  if (typeof input.nonce !== "string" || !/^[a-f0-9]{64}$/.test(input.nonce)) throw new Error("Terminal probe input is invalid");
-  const expectedDigest = createHash("sha256").update(input.nonce).digest("hex");
+  if (typeof logicalRestInput.nonce !== "string" || !/^[a-f0-9]{64}$/.test(logicalRestInput.nonce)) throw new Error("Terminal probe input is invalid");
+  const expectedDigest = createHash("sha256").update(logicalRestInput.nonce).digest("hex");
   if (output.digest !== expectedDigest) throw new Error("Terminal probe output does not match its input");
 
   return {

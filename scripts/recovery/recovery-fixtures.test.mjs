@@ -9,6 +9,7 @@ import { canonicalObjectManifest, classifyRestoredJob } from "./recovery-fixture
 import {
   TERMINAL_PROBE_TASK,
   canonicalizeTerminalRunObservation,
+  jsonHash,
   observeTerminalRun,
 } from "./hatchet-terminal-evidence.mjs";
 import {
@@ -31,7 +32,7 @@ function terminalRunResponses(runId, nonce = "a".repeat(64)) {
       workflowVersionId: "20000000-0000-4000-8000-000000000003",
     },
     shape: [{ taskName: TERMINAL_PROBE_TASK }],
-    tasks: [{ status: "COMPLETED", finishedAt: "2026-08-10T12:00:00.000Z", taskExternalId, input: { nonce }, output }],
+    tasks: [{ status: "COMPLETED", finishedAt: "2026-08-10T12:00:00.000Z", taskExternalId, input: { input: { nonce } }, output }],
   };
   const details = {
     done: true,
@@ -107,6 +108,29 @@ test("terminal run evidence requires matching completed REST and gRPC observatio
   assert.equal(observation.taskName, TERMINAL_PROBE_TASK);
   assert.equal(observation.status, "COMPLETED");
   assert.equal("nonce" in observation, false);
+  assert.equal(observation.inputSha256, jsonHash(rest.tasks[0].input));
+
+  assert.throws(
+    () => canonicalizeTerminalRunObservation(
+      runId,
+      rest,
+      { ...details, input: { nonce: "b".repeat(64) } },
+    ),
+    /inputs differ/,
+  );
+  assert.throws(
+    () => canonicalizeTerminalRunObservation(
+      runId,
+      { ...rest, tasks: [{ ...rest.tasks[0], input: { input: [] } }] },
+      details,
+    ),
+    /REST standalone task input is not an object/,
+  );
+  const flatRest = { ...rest, tasks: [{ ...rest.tasks[0], input: details.input }] };
+  assert.equal(
+    canonicalizeTerminalRunObservation(runId, flatRest, details).inputSha256,
+    jsonHash(details.input),
+  );
 
   assert.throws(
     () => canonicalizeTerminalRunObservation(runId, { ...rest, run: { ...rest.run, status: "RUNNING" } }, details),
@@ -159,7 +183,7 @@ test("source probe creates one run while restored verification is query-only", a
             taskExternalId: rest.tasks[0].taskExternalId,
             workflowName: TERMINAL_PROBE_TASK,
             status: "COMPLETED",
-            input: { nonce },
+            input: rest.tasks[0].input,
           }],
         };
       },
@@ -186,7 +210,7 @@ test("source probe creates one run while restored verification is query-only", a
             taskExternalId: rest.tasks[0].taskExternalId,
             workflowName: TERMINAL_PROBE_TASK,
             status: "COMPLETED",
-            input: { nonce },
+            input: rest.tasks[0].input,
           }],
         };
       },
@@ -209,7 +233,7 @@ test("source probe creates one run while restored verification is query-only", a
               workflowRunExternalId: runId,
               taskExternalId: rest.tasks[0].taskExternalId,
               status: "COMPLETED",
-              input: { nonce },
+              input: rest.tasks[0].input,
             }],
           };
         },
@@ -241,7 +265,7 @@ test("source probe converges an idempotency collision and observes exactly one r
       getDetails: async () => details,
       list: async () => ({
         pagination: {},
-        rows: [{ workflowRunExternalId: runId, taskExternalId: rest.tasks[0].taskExternalId, status: "COMPLETED", input: { nonce } }],
+        rows: [{ workflowRunExternalId: runId, taskExternalId: rest.tasks[0].taskExternalId, status: "COMPLETED", input: rest.tasks[0].input }],
       }),
     },
   };
@@ -326,7 +350,7 @@ test("source probe bounds output and worker cleanup waits", async () => {
       getDetails: async () => details,
       list: async () => ({
         pagination: {},
-        rows: [{ workflowRunExternalId: runId, taskExternalId: rest.tasks[0].taskExternalId, status: "COMPLETED", input: { nonce } }],
+        rows: [{ workflowRunExternalId: runId, taskExternalId: rest.tasks[0].taskExternalId, status: "COMPLETED", input: rest.tasks[0].input }],
       }),
     },
   };
