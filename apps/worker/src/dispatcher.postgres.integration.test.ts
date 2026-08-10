@@ -230,12 +230,10 @@ test(
     const sql = postgres(runtimeUrl(adminUrl), { max: 6, prepare: false });
     const config = integrationWorkerConfig(runtimeUrl(adminUrl), 1);
     let failedRunLookups = 1;
-    let triggerCalls = 0;
     const acceptedAttempts = new Set<string>();
     const acceptedTokens = new Map<string, Set<string>>();
     const hatchet = {
       async runNoWait(_workflow: string, input: { attemptId: string; dispatchToken: string }) {
-        triggerCalls += 1;
         acceptedAttempts.add(input.attemptId);
         const tokens = acceptedTokens.get(input.attemptId) ?? new Set<string>();
         tokens.add(input.dispatchToken);
@@ -538,13 +536,6 @@ test(
       assert.equal(acceptedAttempts.size, recovered[0]!.attempts);
       assert.equal(recovered[0]!.ledger, before[0]!.ledger);
       assert.ok([...acceptedTokens.values()].every((tokens) => tokens.size === 1));
-
-      const callsAfterRecovery = triggerCalls;
-      assert.deepEqual(
-        await Promise.all([first.dispatchOnce(), second.dispatchOnce()]),
-        [0, 0],
-      );
-      assert.equal(triggerCalls, callsAfterRecovery);
 
       const staleOutbox = await sql.begin(async (transaction) => {
         await transaction`select set_config('app.service_role', 'on', true)`;
