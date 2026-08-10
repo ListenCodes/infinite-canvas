@@ -259,6 +259,24 @@ test("probe observation times out and worker startup rejection is handled", asyn
     /timed out/,
   );
 
+  const terminalButInvalid = terminalRunResponses(
+    "20000000-0000-4000-8000-000000000004",
+  );
+  terminalButInvalid.rest.shape = [];
+  await assert.rejects(
+    observeTerminalRun(
+      {
+        runs: {
+          get: async () => terminalButInvalid.rest,
+          getDetails: async () => terminalButInvalid.details,
+        },
+      },
+      "20000000-0000-4000-8000-000000000004",
+      { deadlineMs: 15, pause: async () => {} },
+    ),
+    /Terminal run did not converge: REST run shape does not identify the terminal probe task/,
+  );
+
   let stopped = 0;
   const client = {
     task: () => ({ runNoWait: async () => assert.fail("runNoWait must not execute") }),

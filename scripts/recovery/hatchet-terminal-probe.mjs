@@ -84,7 +84,14 @@ export async function createTerminalRun(client, nonce = randomBytes(32).toString
       if (!isIdempotencyCollision(error)) throw error;
       runId = error.existingRunExternalId;
     }
-    const observed = await bounded(observeTerminalRun(client, runId, { deadlineMs: Math.max(1, deadlineAt - Date.now()) }), "Hatchet probe observation");
+    const observationBudgetMs = Math.max(1, deadlineAt - Date.now());
+    const diagnosticGraceMs = Math.min(1_000, Math.max(25, Math.floor(observationBudgetMs / 10)));
+    const observed = await bounded(
+      observeTerminalRun(client, runId, {
+        deadlineMs: Math.max(1, observationBudgetMs - diagnosticGraceMs),
+      }),
+      "Hatchet probe observation",
+    );
     const inventory = await bounded(terminalRunInventory(client), "Hatchet probe inventory");
     requireSingleProbeInventoryEntry(inventory, observed);
     return observed;
