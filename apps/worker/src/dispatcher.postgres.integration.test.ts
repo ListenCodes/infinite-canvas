@@ -1323,14 +1323,25 @@ test(
       );
       const reconcileAt = new Date(retainedUnknownLease[0]!.reconcile_after.getTime() + 1_000);
       const firstReconcile = providerReconciler.reconcileOnce(reconcileAt);
-      await Promise.race([
-        providerPollStarted,
-        firstReconcile.then(() => {
-          throw new Error("Unknown reconciliation completed before provider polling started");
-        }),
-      ]);
-      assert.ok((await providerReconciler.reconcileOnce(reconcileAt)) >= 1);
-      releaseProviderPoll();
+      let pollStartTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          providerPollStarted,
+          firstReconcile.then(() => {
+            throw new Error("Unknown reconciliation completed before provider polling started");
+          }),
+          new Promise<never>((_, reject) => {
+            pollStartTimer = setTimeout(
+              () => reject(new Error("Unknown reconciliation did not reach provider polling within 30 seconds")),
+              30_000,
+            );
+          }),
+        ]);
+        assert.ok((await providerReconciler.reconcileOnce(reconcileAt)) >= 1);
+      } finally {
+        if (pollStartTimer) clearTimeout(pollStartTimer);
+        releaseProviderPoll();
+      }
       assert.ok((await firstReconcile) >= 1);
       assert.equal(providerPolls, 1);
       assert.equal(providerSubmits, 0);
