@@ -661,3 +661,16 @@ test("release gate runs browser close and relogin recovery after the production 
     "npm run verify:browser-relogin-recovery",
   );
 });
+
+test("PostgreSQL fixture types dynamic role parameters before format", async () => {
+  const runner = await readFile(
+    resolve(repository, "scripts/run-postgres-tests.mjs"),
+    "utf8",
+  );
+  assert.match(runner, /\$\{migrationRole\}::text/);
+  assert.match(runner, /\$\{migrationPassword\}::text/);
+  assert.doesNotMatch(
+    runner,
+    /\$\{migrationRole\}\s*,\s*\$\{migrationPassword\}\s*\n/,
+  );
+});

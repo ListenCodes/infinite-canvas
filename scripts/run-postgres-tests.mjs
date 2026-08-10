@@ -43,7 +43,7 @@ try {
   const roleCommands = await admin`
     select format(
       'create role %I login noinherit nosuperuser nocreatedb nocreaterole noreplication nobypassrls password %L',
-      ${migrationRole}, ${migrationPassword}
+      ${migrationRole}::text, ${migrationPassword}::text
     ) as command
   `;
   await admin.unsafe(roleCommands[0].command);
