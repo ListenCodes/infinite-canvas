@@ -891,7 +891,8 @@ test("ten concurrent idempotent creates and failed-slot retries preserve exact c
         ),
         assertCode("project_not_found"),
       );
-      const queuedJob = afterRetry.jobs.find((job) => job.status === "queued");
+      const suspendedBatch = await service.getBatch(userId, batchId);
+      const queuedJob = suspendedBatch.jobs.find((job) => job.status === "queued");
       assert.ok(queuedJob);
       await assert.rejects(
         service.retryJob(userId, queuedJob.jobId, "retry-suspended-workspace-0001"),
