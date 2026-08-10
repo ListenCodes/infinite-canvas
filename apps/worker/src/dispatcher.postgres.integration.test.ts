@@ -425,7 +425,8 @@ test(
       `;
         assert.ok(outbox[0]);
         await transaction`
-        update outbox_events set attempts = 9, created_at = now() - interval '31 minutes', available_at = now() - interval '1 second'
+        update outbox_events set attempts = 9, created_at = now() - interval '31 minutes',
+          available_at = timestamptz '1900-01-01 00:00:00+00'
         where id = ${outbox[0]!.id}
       `;
         return transaction<{ ledger: number }[]>`
@@ -463,7 +464,8 @@ test(
         `;
         assert.ok(rows[0]?.dispatch_started_token);
         await transaction`
-          update outbox_events set payload = '{}'::jsonb, available_at = now()
+          update outbox_events set payload = '{}'::jsonb,
+            available_at = timestamptz '1900-01-01 00:00:00+00'
           where id = ${rows[0]!.id}
         `;
         return rows[0]!;
@@ -477,7 +479,8 @@ test(
           from outbox_events where id = ${ambiguousOutbox.id}
         `;
         await transaction`
-          update outbox_events set payload = ${jsonParameter(transaction, ambiguousOutbox.payload)}, available_at = now()
+          update outbox_events set payload = ${jsonParameter(transaction, ambiguousOutbox.payload)},
+            available_at = timestamptz '1900-01-01 00:00:00+00'
           where id = ${ambiguousOutbox.id}
         `;
         return rows[0]!;
@@ -491,7 +494,7 @@ test(
       await sql.begin(async (transaction) => {
         await transaction`select set_config('app.service_role', 'on', true)`;
         await transaction`
-          update outbox_events set available_at = timestamptz '2000-01-01 00:00:00+00'
+          update outbox_events set available_at = timestamptz '1900-01-01 00:00:00+00'
           where workspace_id = ${workspaceId} and status = 'pending'
         `;
       });
@@ -643,7 +646,7 @@ test(
               channelId: current.channel_id,
               capacity: integrationCapacity(current.capability),
             })},
-            9, timestamptz '1990-01-01 00:00:00+00', now() - interval '31 minutes'
+            9, timestamptz '1900-01-01 00:00:00+00', now() - interval '31 minutes'
           )
         `;
         return { ...current, outbox_id: outboxId };
