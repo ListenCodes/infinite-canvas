@@ -324,7 +324,7 @@ test(
             ${templateRow.provider_idempotency_supported}, ${templateRow.request_fingerprint},
             now() + interval '30 minutes', ${extraDispatchToken},
             ${template.capacity.policyVersion}, ${template.capacity.workspaceConcurrencyLimit},
-            ${template.capacity.workspaceRateLimitPerMinute}, ${template.capacity.channelConcurrencyLimit + 1},
+            ${template.capacity.workspaceRateLimitPerMinute}, ${template.capacity.channelConcurrencyLimit},
             ${template.capacity.channelRateLimitPerMinute}
           )
         `;
@@ -338,10 +338,7 @@ test(
             ...template,
             jobId: extraJobId,
             attemptId: extraAttemptId,
-            capacity: {
-              ...template.capacity,
-              channelConcurrencyLimit: template.capacity.channelConcurrencyLimit + 1,
-            },
+            capacity: template.capacity,
           }),
         };
       });
