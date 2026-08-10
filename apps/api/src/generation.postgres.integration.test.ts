@@ -55,22 +55,6 @@ test("ten concurrent idempotent creates and failed-slot retries preserve exact c
       await transaction`insert into workspaces (id, owner_user_id, name) values (${providerCreateWorkspaceId}, ${userId}, 'Provider Create Gate Workspace') on conflict do nothing`;
       await transaction`insert into workspace_members (workspace_id, user_id, role) values (${providerCreateWorkspaceId}, ${userId}, 'owner') on conflict do nothing`;
       await transaction`
-        insert into projects (id, workspace_id, title, document_json, updated_by)
-        values (
-          ${projectId}, ${workspaceId}, 'Concurrency Project',
-          ${JSON.stringify({ document: { nodes: [{ id: "node-1", metadata: { images: slots.map((id) => ({ id })) } }] } })}::jsonb,
-          ${userId}
-        ) on conflict do nothing
-      `;
-      await transaction`
-        insert into projects (id, workspace_id, title, document_json, updated_by)
-        values (
-          ${providerCreateProjectId}, ${providerCreateWorkspaceId}, 'Provider Create Gate Project',
-          ${JSON.stringify({ document: { nodes: [{ id: "provider-create-node", metadata: { images: providerCreateSlots.map((id) => ({ id })) } }] } })}::jsonb,
-          ${userId}
-        ) on conflict do nothing
-      `;
-      await transaction`
         insert into provider_channels (id, name, type, base_url, capabilities)
         values (${channelId}, 'Integration Provider', 'grok2api', 'https://provider.example', '["image"]'::jsonb)
         on conflict do nothing
@@ -133,6 +117,38 @@ test("ten concurrent idempotent creates and failed-slot retries preserve exact c
         values (${providerCreateWorkspaceId}, 1000, 0) on conflict (workspace_id) do update set available = 1000, reserved = 0
       `;
     });
+
+    const setupIds = [
+      randomUUID(), projectId, randomUUID(),
+      randomUUID(), providerCreateProjectId, randomUUID(),
+    ];
+    const setupProjectService = new ProjectService(sql, () => {
+      const id = setupIds.shift();
+      assert.ok(id, "project fixture exhausted its deterministic identifiers");
+      return id;
+    });
+    const createdProject = await setupProjectService.create(userId, createProjectSchema.parse({
+      workspaceId,
+      clientProjectId: "concurrency-project",
+      title: "Concurrency Project",
+      documentJson: {
+        schemaVersion: 1,
+        localProjectId: "concurrency-project",
+        document: { nodes: [{ id: "node-1", metadata: { images: slots.map((id) => ({ id })) } }] },
+      },
+    }), "project-create-concurrency-project");
+    const providerCreateProject = await setupProjectService.create(userId, createProjectSchema.parse({
+      workspaceId: providerCreateWorkspaceId,
+      clientProjectId: "provider-create-gate-project",
+      title: "Provider Create Gate Project",
+      documentJson: {
+        schemaVersion: 1,
+        localProjectId: "provider-create-gate-project",
+        document: { nodes: [{ id: "provider-create-node", metadata: { images: providerCreateSlots.map((id) => ({ id })) } }] },
+      },
+    }), "project-create-provider-create-gate");
+    assert.equal(createdProject.id, projectId);
+    assert.equal(providerCreateProject.id, providerCreateProjectId);
 
     const service = new GenerationService(sql, randomUUID, 86_400);
     const request = {
