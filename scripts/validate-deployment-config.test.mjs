@@ -766,6 +766,58 @@ test("release gate runs browser close and relogin recovery after the production 
   assert.match(verifier, /boundary-probe/);
 });
 
+test("release gate runs real browser SSE and video recovery after the production Web build", async () => {
+  const workflow = parse(
+    await readFile(
+      resolve(repository, ".github/workflows/release-gate.yml"),
+      "utf8",
+    ),
+  );
+  const steps = workflow.jobs?.quality?.steps;
+  assert.ok(Array.isArray(steps));
+  const buildIndex = steps.findIndex(({ name }) => name === "Verify Web");
+  const recoveryIndex = steps.findIndex(
+    ({ name }) => name === "Verify browser SSE and video recovery",
+  );
+  assert.ok(buildIndex >= 0 && recoveryIndex > buildIndex);
+  assert.equal(steps[recoveryIndex].run, "npm run verify:browser-cloud-recovery");
+
+  const verifier = await readFile(
+    resolve(repository, "web/scripts/verify-browser-cloud-recovery.mjs"),
+    "utf8",
+  );
+  assert.match(verifier, /runSseRecoveryGate/);
+  assert.match(verifier, /runVideoRecoveryGate/);
+  assert.match(verifier, /Last-Event-ID|last-event-id/);
+  assert.match(verifier, /counters\.create/);
+});
+
+test("release gate runs the production three-slot retry UI after the Web build", async () => {
+  const workflow = parse(
+    await readFile(
+      resolve(repository, ".github/workflows/release-gate.yml"),
+      "utf8",
+    ),
+  );
+  const steps = workflow.jobs?.quality?.steps;
+  assert.ok(Array.isArray(steps));
+  const buildIndex = steps.findIndex(({ name }) => name === "Verify Web");
+  const retryIndex = steps.findIndex(
+    ({ name }) => name === "Verify browser three-slot retry",
+  );
+  assert.ok(buildIndex >= 0 && retryIndex > buildIndex);
+  assert.equal(steps[retryIndex].run, "npm run verify:browser-three-slot-retry");
+
+  const verifier = await readFile(
+    resolve(repository, "scripts/verify-browser-three-slot-retry.mjs"),
+    "utf8",
+  );
+  assert.match(verifier, /Provider capacity was exhausted/);
+  assert.match(verifier, /Prompt was rejected by moderation/);
+  assert.match(verifier, /retryCalls\.length, 2/);
+  assert.match(verifier, /counters\.create, 0/);
+});
+
 test("PostgreSQL fixture types dynamic role parameters before format", async () => {
   const runner = await readFile(
     resolve(repository, "scripts/run-postgres-tests.mjs"),

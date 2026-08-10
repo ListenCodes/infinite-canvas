@@ -75,18 +75,18 @@ bindings before creating version image tags or publishing the Release.
 
 The commit containing this section has the following local evidence on 2026-08-10:
 
-- `npm test` passes 87 workspace tests and skips three environment-gated entries.
-  The API, Worker, and database suites each expose one real-PostgreSQL integration
-  entry; those three entries are skipped by the normal unit command when
-  `TEST_POSTGRES_ADMIN_URL` is absent.
-- The Web suites pass 52 tests across legacy media adapters, canvas terminal-state
+- `npm test` runs 99 workspace tests: 95 pass and four real-PostgreSQL entries are
+  skipped when `TEST_POSTGRES_ADMIN_URL` is absent. The release gate runs the database
+  entry, the API entry, and both Worker PostgreSQL scenarios against one isolated
+  PostgreSQL service.
+- The Web suites pass 57 tests across legacy media adapters, canvas terminal-state
   handling, cloud recovery/SSE, and local-to-cloud migration safety. The migration
   tests cover account/workspace isolation, two-phase activation, fail-closed media
   export, ordered retry-key persistence, and rollback of standalone media and text
   assets without deleting the original local archive.
 - Root and Web type checks and production builds pass. Root and Web production
   dependency audits report zero known vulnerabilities. Deployment/recovery policy
-  tests pass 32 scenarios, and the deployment, recovery-boundary, Web bundle secret,
+  tests pass 50 scenarios, and the deployment, recovery-boundary, Web bundle secret,
   isolated-browser storage secret, and diff checks pass. The OSS terminal smoke is
   wired into the Linux release gate but has not run on this Docker-less workstation.
 - Capacity tests cover v1/v2 contract separation, immutable attempt snapshots,
@@ -110,14 +110,21 @@ The commit containing this section has the following local evidence on 2026-08-1
   sends real AWS SDK requests to Moto and requires the first conditional write, second
   `412`, and immutable HEAD metadata round trip before taking its source checkpoint.
 - Rows 11-12 include HTTP SSE replay with `Last-Event-ID`, a two-instance broker test
-  where one instance loses NOTIFY and recovers by scan, EOF reconnect, and snapshot
-  fallback after subscribe failure. The recovery driver dependency surface has no
-  create/submit operation.
+  where one instance loses NOTIFY and recovers by scan, and a real Chromium gate that
+  runs the production event pump through EOF, cursor-expired failure, monotonic snapshot
+  fallback, and reconnect. The browser gate also resumes all four persisted video
+  refresh windows through the production watcher and IndexedDB materializer. Every
+  recovery path fails if it creates a new generation batch.
+- Row 4 includes a built-application Chromium gate with one preserved successful image
+  and two slots carrying distinct provider failures. It rapidly clicks both production
+  retry controls, holds both HTTP requests concurrently, requires two distinct retry
+  idempotency keys, and fails if either request is aborted or a new batch is created.
 - Row 14 includes a built-bundle/runtime-config canary scan, representative Fastify
   response/header canary tests, and real Pino output tests for structured credentials
-  and Error message/stack redaction. A fresh isolated headless browser loads the built
-  Web application and recursively scans local storage, session storage, and IndexedDB;
-  injected probes prove that every storage layer is actually inspected.
+  and Error message/stack redaction. Fresh isolated headless browsers recursively scan
+  local storage, session storage, IndexedDB, and authenticated Auth/API request and
+  response fields. Controlled canary probes prove both the storage and network scanners
+  detect the exact platform secrets before the operational flow is required to be clean.
 - Runtime database ACL tests revoke the default public execute privilege from all
   write-capable `SECURITY DEFINER` helpers. The recovery-audit role retains only
   read access and the four RLS identity helpers. Migration ledger entries bind both

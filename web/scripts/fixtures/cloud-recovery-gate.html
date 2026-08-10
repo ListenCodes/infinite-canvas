@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Cloud recovery browser gate</title>
+    </head>
+    <body>
+        <main id="gate-status">loading</main>
+        <script>
+            window.__RUNTIME_CONFIG__ = {
+                CLOUD_BACKEND_ENABLED: "true",
+                API_BASE_URL: "/api",
+                SUPABASE_URL: window.location.origin,
+                SUPABASE_ANON_KEY: "local-public-anon-key",
+            };
+        </script>
+        <script type="module">
+            const USER_ID = "00000000-0000-4000-8000-000000000001";
+            const WORKSPACE_ID = "00000000-0000-4000-8000-000000000101";
+            const EMAIL = "cloud-recovery-gate@example.invalid";
+            const PASSWORD = "local-fixture-password";
+
+            const { getSupabaseClient } = await import("/src/services/api/supabase.ts");
+            const { bootstrapCloudSession } = await import("/src/services/api/cloud-session.ts");
+            const { getCloudGenerationBatch, subscribeCloudEvents } = await import("/src/services/api/cloud-generation.ts");
+            const { runCloudGenerationEventPump } = await import("/src/pages/canvas/cloud-generation-watch-core.ts");
+            const { resumeCloudVideoBatches } = await import("/src/pages/canvas/cloud-video-generation.ts");
+            const { getMediaBlob } = await import("/src/services/file-storage.ts");
+            const { useUserStore } = await import("/src/stores/use-user-store.ts");
+
+            async function authenticate() {
+                const client = getSupabaseClient();
+                if (!client) throw new Error("Supabase client was not configured");
+                const { data, error } = await client.auth.signInWithPassword({ email: EMAIL, password: PASSWORD });
+                if (error || data.user?.id !== USER_ID) throw error ?? new Error("Unexpected fixture user");
+                const session = await bootstrapCloudSession(USER_ID);
+                if (session.workspaceId !== WORKSPACE_ID) throw new Error("Unexpected fixture workspace");
+                useUserStore.getState().setCloudSession({
+                    user: { id: USER_ID, displayName: "Recovery Gate", email: EMAIL },
+                    workspaceId: session.workspaceId,
+                    workspaceRole: session.role,
+                    platformRole: session.platformRole,
+                    wallet: session.wallet,
+                    featureFlags: session.featureFlags,
+                });
+            }
+
+            function delay(milliseconds) {
+                return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+            }
+
+            window.runSseRecoveryGate = async (batchId) => {
+                await authenticate();
+                const controller = new AbortController();
+                const sequences = [];
+                await runCloudGenerationEventPump({
+                    signal: controller.signal,
+                    initialCursor: "0",
+                    reconnectDelayMs: 1,
+                    waitForReconnect: (delayMs, signal) =>
+                        new Promise((resolve, reject) => {
+                            const timer = window.setTimeout(resolve, delayMs);
+                            signal.addEventListener("abort", () => {
+                                window.clearTimeout(timer);
+                                reject(signal.reason);
+                            }, { once: true });
+                        }),
+                    loadSnapshot: (signal) => getCloudGenerationBatch(batchId, signal),
+                    subscribe: ({ projectId, cursor, signal, onEventSequence }) =>
+                        subscribeCloudEvents({
+                            projectId,
+                            cursor,
+                            signal,
+                            onEvent: (event) => {
+                                sequences.push(event.sequence);
+                                onEventSequence(event.sequence);
+                                if (event.sequence === "26") controller.abort("gate-complete");
+                            },
+                        }),
+                    onEvent: () => undefined,
+                });
+                return sequences;
+            };
+
+            window.runVideoRecoveryGate = async ({ node, projectId }) => {
+                await authenticate();
+                const controller = new AbortController();
+                let nodes = [structuredClone(node)];
+                const setNodes = (updater) => {
+                    nodes = updater(nodes);
+                };
+                await resumeCloudVideoBatches(nodes, setNodes, controller.signal, projectId, []);
+                const deadline = Date.now() + 12_000;
+                for (;;) {
+                    const current = nodes[0];
+                    const serverStatus = current?.metadata?.cloudJob?.serverStatus;
+                    const complete = serverStatus === "outcome_unknown"
+                        || (serverStatus === "succeeded" && current?.metadata?.status === "success" && current.metadata.storageKey);
+                    if (complete) {
+                        const stored = current.metadata.storageKey ? await getMediaBlob(current.metadata.storageKey) : null;
+                        controller.abort("gate-complete");
+                        return {
+                            node: current,
+                            storedBytes: stored?.size ?? 0,
+                        };
+                    }
+                    if (Date.now() >= deadline) {
+                        controller.abort("gate-timeout");
+                        throw new Error(`Video recovery did not converge from ${serverStatus ?? "missing"}`);
+                    }
+                    await delay(25);
+                }
+            };
+
+            document.querySelector("#gate-status").textContent = "ready";
+            window.__cloudRecoveryGateReady = true;
+        </script>
+    </body>
+</html>

@@ -57,6 +57,10 @@ jobs:
         env:
           SECRET_SCAN_CANARIES: release-gate-service-secret-0001,release-gate-hatchet-secret-0002,release-gate-credential-secret-0003
         run: npm run verify:browser-relogin-recovery
+      - name: Verify browser SSE and video recovery
+        run: npm run verify:browser-cloud-recovery
+      - name: Verify browser three-slot retry
+        run: npm run verify:browser-three-slot-retry
 
   postgres-integration:
     runs-on: ubuntu-24.04
