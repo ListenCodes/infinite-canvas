@@ -6,7 +6,15 @@ import { CloudApiError } from "@/services/api/cloud-client";
 import { getCloudAssetUrl } from "@/services/api/cloud-assets";
 import { createCloudProject, listCloudProjects, updateCloudProject } from "@/services/api/cloud-projects";
 import { loadCloudMigrationRecord } from "@/services/cloud-migration";
-import { cloudMigrationActivationMatches, cloudMigrationRecordKey, cloudProjectBindingMatchesIdentity, cloudProjectResponseMayUpdateBinding, isCloudImportPublishedFor, type CloudMigrationIdentity } from "@/services/cloud-migration-policy";
+import {
+    cloudMigrationActivationMatches,
+    cloudMigrationRecordKey,
+    cloudProjectBindingMatchesIdentity,
+    cloudProjectBindingUnchanged,
+    cloudProjectResponseMayUpdateBinding,
+    isCloudImportPublishedFor,
+    type CloudMigrationIdentity,
+} from "@/services/cloud-migration-policy";
 import { uploadImage } from "@/services/image-storage";
 import { uploadMediaFile } from "@/services/file-storage";
 import { useCanvasStore, type CanvasProject } from "@/stores/canvas/use-canvas-store";
@@ -37,7 +45,7 @@ function hasLocalMediaReference(value: unknown): boolean {
     return Object.values(record).some((item) => (Array.isArray(item) ? item.some(hasLocalMediaReference) : hasLocalMediaReference(item)));
 }
 
-async function hydrateCloudAssets(value: unknown): Promise<unknown> {
+async function hydrateCloudAssets(value: unknown, signal: AbortSignal, identity: CloudMigrationIdentity): Promise<unknown> {
     const materialized = new Map<string, Promise<Awaited<ReturnType<typeof uploadImage>> | Awaited<ReturnType<typeof uploadMediaFile>>>>();
     const visit = async (item: unknown): Promise<unknown> => {
         if (Array.isArray(item)) return Promise.all(item.map(visit));
@@ -50,11 +58,12 @@ async function hydrateCloudAssets(value: unknown): Promise<unknown> {
         let pending = materialized.get(assetId);
         if (!pending) {
             pending = (async () => {
-                const signed = await getCloudAssetUrl(assetId);
-                const response = await fetch(signed.signedUrl);
+                const signed = await getCloudAssetUrl(assetId, signal, identity);
+                const response = await fetch(signed.signedUrl, { signal });
                 if (!response.ok) throw new Error(`Cloud asset download failed with HTTP ${response.status}`);
                 const blob = await response.blob();
-                return mime.startsWith("image/") ? uploadImage(blob) : uploadMediaFile(blob, mime.startsWith("video/") ? "video" : "audio");
+                signal.throwIfAborted();
+                return mime.startsWith("image/") ? uploadImage(blob, { signal }) : uploadMediaFile(blob, mime.startsWith("video/") ? "video" : "audio", signal);
             })();
             materialized.set(assetId, pending);
         }
@@ -75,8 +84,8 @@ async function hydrateCloudAssets(value: unknown): Promise<unknown> {
     return visit(value);
 }
 
-async function fromProjection(remote: ProjectProjection): Promise<CanvasProject | null> {
-    const source = (await hydrateCloudAssets(remote.documentJson.document)) as Partial<CanvasProject>;
+async function fromProjection(remote: ProjectProjection, signal: AbortSignal, identity: CloudMigrationIdentity): Promise<CanvasProject | null> {
+    const source = (await hydrateCloudAssets(remote.documentJson.document, signal, identity)) as Partial<CanvasProject>;
     if (!Array.isArray(source.nodes) || !Array.isArray(source.connections)) return null;
     return {
         id: remote.documentJson.localProjectId,
@@ -103,15 +112,23 @@ export function useCloudProjectsBootstrap(): void {
     useEffect(() => {
         if (!CLOUD_BACKEND_CONFIGURED || !authenticated || !projectsEnabled || !userId || !workspaceId || !hydrated) return;
         let disposed = false;
+        const controller = new AbortController();
         const identity = { userId, workspaceId };
+        const assertCurrentIdentity = () => {
+            const session = useUserStore.getState();
+            if (disposed || controller.signal.aborted || !session.authenticated || session.user?.id !== identity.userId || session.workspaceId !== identity.workspaceId) {
+                throw controller.signal.reason ?? new DOMException("Cloud project identity changed", "AbortError");
+            }
+        };
         const load = async (requestedExportId?: string, approvedProjectRevisions?: Readonly<Record<string, string>>) => {
             const migration = await loadCloudMigrationRecord(identity);
+            assertCurrentIdentity();
             if (requestedExportId !== undefined && (!migration || migration.status !== "published" || !cloudMigrationActivationMatches(migration, { ...identity, clientExportId: requestedExportId }))) {
                 throw new Error("Cloud migration activation no longer matches the published import");
             }
             const mayReplaceImportedLocal = Boolean(migration?.status === "published" && (requestedExportId === undefined ? migration.activatedAt : cloudMigrationActivationMatches(migration, { ...identity, clientExportId: requestedExportId })));
-            const projects = await listCloudProjects();
-            if (disposed) {
+            const projects = await listCloudProjects(controller.signal, identity);
+            if (disposed || controller.signal.aborted) {
                 if (requestedExportId !== undefined) throw new Error("Cloud migration activation was interrupted");
                 return;
             }
@@ -127,8 +144,9 @@ export function useCloudProjectsBootstrap(): void {
                 currentProjectRevisions: () => useCanvasStore.getState().projects,
                 findLocal: (localProjectId) => store.openProject(localProjectId) ?? undefined,
                 materialize: async (remote) => {
-                    const project = await fromProjection(remote);
-                    if (disposed) {
+                    assertCurrentIdentity();
+                    const project = await fromProjection(remote, controller.signal, identity);
+                    if (disposed || controller.signal.aborted) {
                         if (requestedExportId !== undefined) throw new Error("Cloud migration activation was interrupted");
                         return null;
                     }
@@ -136,7 +154,8 @@ export function useCloudProjectsBootstrap(): void {
                     return { ...project, cloud: { ...project.cloud!, userId } };
                 },
                 apply: (staged) => {
-                    if (disposed) {
+                    assertCurrentIdentity();
+                    if (disposed || controller.signal.aborted) {
                         if (requestedExportId !== undefined) throw new Error("Cloud migration activation was interrupted");
                         return;
                     }
@@ -155,6 +174,7 @@ export function useCloudProjectsBootstrap(): void {
         window.addEventListener("infinite-canvas:cloud-import-published", reload);
         return () => {
             disposed = true;
+            controller.abort(new DOMException("Cloud project identity changed", "AbortError"));
             window.removeEventListener("infinite-canvas:cloud-import-published", reload);
         };
     }, [authenticated, hydrated, projectsEnabled, userId, workspaceId]);
@@ -168,8 +188,18 @@ export function useCloudProjectSync(localProjectId: string) {
     const project = useCanvasStore((state) => state.projects.find((item) => item.id === localProjectId));
     const queue = useRef<Promise<ProjectProjection | null>>(Promise.resolve(null));
     const lastDocument = useRef("");
+    const persistController = useRef<AbortController | null>(null);
     const identity = useMemo<CloudMigrationIdentity | null>(() => (authenticated && userId && workspaceId ? { userId, workspaceId } : null), [authenticated, userId, workspaceId]);
+    const identityKey = identity ? cloudMigrationRecordKey(identity) : null;
     const bindingMatchesIdentity = cloudProjectBindingMatchesIdentity(project?.cloud, identity);
+
+    useEffect(
+        () => () => {
+            persistController.current?.abort(new DOMException("Cloud project identity changed", "AbortError"));
+            persistController.current = null;
+        },
+        [identityKey],
+    );
 
     const currentSessionMatches = useCallback(() => {
         if (!identity) return false;
@@ -186,17 +216,35 @@ export function useCloudProjectSync(localProjectId: string) {
         if (serialized === lastDocument.current && current.cloud) {
             return { id: current.cloud.projectId, workspaceId: current.cloud.workspaceId, title: current.title, documentJson, version: current.cloud.version, createdAt: current.createdAt, updatedAt: current.updatedAt } as ProjectProjection;
         }
+        const controller = new AbortController();
+        persistController.current = controller;
         try {
             if (!current.cloud && hasLocalMediaReference(current)) return null;
             let remote = current.cloud
-                ? await updateCloudProject(current.cloud.projectId, { title: current.title, documentJson, version: current.cloud.version })
-                : await createCloudProject({ title: current.title, documentJson, workspaceId: workspaceIdSchema.parse(identity.workspaceId), clientProjectId: localProjectId }, `project-create:${identity.userId}:${localProjectId}`);
+                ? await updateCloudProject(current.cloud.projectId, { title: current.title, documentJson, version: current.cloud.version }, controller.signal)
+                : await createCloudProject({ title: current.title, documentJson, workspaceId: workspaceIdSchema.parse(identity.workspaceId), clientProjectId: localProjectId }, `project-create:${identity.userId}:${localProjectId}`, controller.signal);
             if (!current.cloud && (remote.title !== current.title || JSON.stringify(remote.documentJson) !== JSON.stringify(documentJson))) {
-                remote = await updateCloudProject(remote.id, {
-                    title: current.title,
-                    documentJson,
-                    version: remote.version,
-                });
+                const latest = useCanvasStore.getState().projects.find((item) => item.id === localProjectId);
+                if (
+                    !currentSessionMatches() ||
+                    !latest ||
+                    !cloudProjectResponseMayUpdateBinding({
+                        identity,
+                        capturedBinding: undefined,
+                        latestBinding: latest.cloud,
+                        response: remote,
+                    })
+                )
+                    return null;
+                remote = await updateCloudProject(
+                    remote.id,
+                    {
+                        title: current.title,
+                        documentJson,
+                        version: remote.version,
+                    },
+                    controller.signal,
+                );
             }
             const latest = useCanvasStore.getState().projects.find((item) => item.id === localProjectId);
             if (
@@ -217,11 +265,13 @@ export function useCloudProjectSync(localProjectId: string) {
             if (error instanceof CloudApiError && error.detail.code === "project_version_conflict") {
                 const currentVersion = Number(error.detail.details?.currentVersion || 0);
                 const binding = useCanvasStore.getState().projects.find((item) => item.id === localProjectId)?.cloud;
-                if (currentSessionMatches() && binding && cloudProjectBindingMatchesIdentity(binding, identity)) {
+                if (currentSessionMatches() && binding && cloudProjectBindingUnchanged(current.cloud, binding, identity)) {
                     useCanvasStore.getState().setCloudBinding(localProjectId, { ...binding, conflictVersion: currentVersion || binding.version });
                 }
             }
             throw error;
+        } finally {
+            if (persistController.current === controller) persistController.current = null;
         }
     }, [bindingMatchesIdentity, currentSessionMatches, featureFlags.projects, identity, localProjectId]);
 
@@ -245,7 +295,7 @@ export function useCloudProjectSync(localProjectId: string) {
         canResume: CLOUD_BACKEND_CONFIGURED && Boolean(identity) && bindingMatchesIdentity,
         canRunImage: enabled && featureFlags.imageGeneration && featureFlags.credits,
         canRunVideo: enabled && featureFlags.videoGeneration && featureFlags.credits,
-        identityKey: identity ? cloudMigrationRecordKey(identity) : null,
+        identityKey,
         flush,
         conflictVersion: project?.cloud?.conflictVersion,
     };

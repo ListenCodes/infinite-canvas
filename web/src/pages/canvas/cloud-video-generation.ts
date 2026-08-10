@@ -70,10 +70,11 @@ async function materializeVideo(nodeId: string, job: GenerationJobProjection, se
     if (job.status !== "succeeded") return true;
     if (!job.assetId) return false;
     try {
-        const signed = await getCloudAssetUrl(job.assetId);
+        const signed = await getCloudAssetUrl(job.assetId, signal);
         const response = await fetch(signed.signedUrl, { signal });
         if (!response.ok) throw new Error(`Generated video download failed with HTTP ${response.status}`);
-        const video = await uploadMediaFile(await response.blob(), "video");
+        const video = await uploadMediaFile(await response.blob(), "video", signal);
+        if (signal.aborted) throw signal.reason;
         const defaults = NODE_DEFAULT_SIZE[CanvasNodeType.Video];
         const size = fitNodeSize(video.width || defaults.width, video.height || defaults.height, defaults.width, defaults.height);
         setNodes((nodes) =>

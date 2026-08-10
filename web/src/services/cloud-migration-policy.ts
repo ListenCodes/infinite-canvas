@@ -3,7 +3,13 @@ export interface CloudMigrationIdentity {
     workspaceId: string;
 }
 
+interface CloudMigrationLockManager {
+    request<T>(name: string, options: { mode: "exclusive" }, callback: () => Promise<T>): Promise<T>;
+}
+
 interface CloudMigrationStartRecord extends CloudMigrationIdentity {
+    clientExportId?: string;
+    importId?: string;
     status: string;
 }
 
@@ -31,6 +37,11 @@ export interface CloudImportPublishedDetail extends CloudMigrationIdentity {
 
 export function cloudMigrationRecordKey(identity: CloudMigrationIdentity): string {
     return `current-v2:${encodeURIComponent(identity.userId)}:${encodeURIComponent(identity.workspaceId)}`;
+}
+
+export function withCloudMigrationLock<T>(identity: CloudMigrationIdentity, callback: () => Promise<T>, lockManager: CloudMigrationLockManager | undefined = globalThis.navigator?.locks): Promise<T> {
+    if (!lockManager) throw new Error("This browser cannot safely coordinate cloud migration tabs");
+    return lockManager.request(`infinite-canvas:${cloudMigrationRecordKey(identity)}`, { mode: "exclusive" }, callback);
 }
 
 export function updateCloudMigrationBusyCounts(counts: CloudMigrationBusyCounts, identity: CloudMigrationIdentity, delta: 1 | -1): CloudMigrationBusyCounts {
@@ -70,6 +81,15 @@ export function cloudProjectResponseMayUpdateBinding(options: {
         return Boolean(cloudMigrationBelongsTo(capturedBinding, identity) && latestBinding && latestBinding.projectId === capturedBinding.projectId && latestBinding.version === capturedBinding.version && response.id === capturedBinding.projectId);
     }
     return !latestBinding || (latestBinding.projectId === response.id && latestBinding.version <= response.version);
+}
+
+export function cloudProjectBindingUnchanged(captured: CloudProjectBindingIdentity | undefined, latest: CloudProjectBindingIdentity | undefined, identity: CloudMigrationIdentity): boolean {
+    if (!captured) return !latest;
+    return Boolean(latest && cloudMigrationBelongsTo(captured, identity) && cloudMigrationBelongsTo(latest, identity) && latest.projectId === captured.projectId && latest.version === captured.version);
+}
+
+export function cloudMigrationRecordMatchesExpected<T extends CloudMigrationStartRecord>(current: T | null, expected: T): current is T {
+    return Boolean(current && cloudMigrationBelongsTo(current, expected) && current.clientExportId === expected.clientExportId && current.importId === expected.importId && current.status === expected.status);
 }
 
 export function isCloudMigrationIdentityLoaded(loadedIdentityKey: string | null, identity: CloudMigrationIdentity | null): boolean {

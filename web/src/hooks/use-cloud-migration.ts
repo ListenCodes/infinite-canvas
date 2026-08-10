@@ -2,16 +2,19 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { createCloudMigrationArchive } from "@/lib/canvas/cloud-migration-export";
 import { createCloudImport, getCloudImport } from "@/services/api/cloud-imports";
+import { isCloudRequestAbort } from "@/services/api/cloud-request-identity";
 import { loadCloudMigrationRecord, loadLegacyCloudMigrationRecord, saveCloudMigrationRecord, type CloudMigrationRecord, type LegacyCloudMigrationRecord } from "@/services/cloud-migration";
 import {
     cloudMigrationBelongsTo,
     cloudMigrationLoadRetryDelay,
+    cloudMigrationRecordMatchesExpected,
     cloudMigrationRecordKey,
     ensureCloudMigrationCanStart,
     isCloudMigrationBusy,
     isCloudMigrationIdentityLoaded,
     localProjectsChangedSinceExport,
     updateCloudMigrationBusyCounts,
+    withCloudMigrationLock,
     type CloudMigrationBusyCounts,
     type CloudMigrationIdentity,
 } from "@/services/cloud-migration-policy";
@@ -53,6 +56,7 @@ export function useCloudMigration() {
     const [legacyRecord, setLegacyRecord] = useState<LegacyCloudMigrationRecord | null>(null);
     const [busyCounts, setBusyCounts] = useState<CloudMigrationBusyCounts>({});
     const activeRequests = useRef(new Set<string>());
+    const requestControllers = useRef(new Map<string, AbortController>());
     const recordLoadFailures = useRef(new Map<string, number>());
 
     const changeBusy = useCallback((identity: CloudMigrationIdentity, delta: 1 | -1) => {
@@ -77,26 +81,67 @@ export function useCloudMigration() {
             const requestKey = cloudMigrationRecordKey(current);
             if (activeRequests.current.has(requestKey)) return;
             activeRequests.current.add(requestKey);
+            const controller = new AbortController();
+            requestControllers.current.set(requestKey, controller);
             changeBusy(current, 1);
             try {
-                const response = current.status === "prepared" || current.status === "failed" ? await createCloudImport(current.archive) : current.importId ? await getCloudImport(current.importId) : await createCloudImport(current.archive);
-                await persist(applyResponse(current, response));
-            } catch (error) {
-                await persist({
-                    ...current,
-                    status: "failed",
-                    error: {
-                        code: "client_request_failed",
-                        message: error instanceof Error ? error.message : "Cloud migration request failed",
-                    },
+                await withCloudMigrationLock(current, async () => {
+                    const assertRequestIdentity = () => {
+                        if (controller.signal.aborted || !currentSessionMatches(current)) {
+                            throw controller.signal.reason ?? new DOMException("Cloud migration identity changed", "AbortError");
+                        }
+                    };
+                    const persisted = await loadCloudMigrationRecord(current);
+                    assertRequestIdentity();
+                    if (!cloudMigrationRecordMatchesExpected(persisted, current)) {
+                        throw new Error("Cloud migration state changed before the request started");
+                    }
+                    try {
+                        const response =
+                            persisted.status === "prepared" || persisted.status === "failed"
+                                ? await createCloudImport(persisted.archive, controller.signal)
+                                : persisted.importId
+                                  ? await getCloudImport(persisted.importId, controller.signal)
+                                  : await createCloudImport(persisted.archive, controller.signal);
+                        assertRequestIdentity();
+                        const latest = await loadCloudMigrationRecord(current);
+                        assertRequestIdentity();
+                        if (!cloudMigrationRecordMatchesExpected(latest, persisted)) {
+                            throw new Error("Cloud migration state changed while the request was active");
+                        }
+                        await persist(applyResponse(latest, response));
+                    } catch (error) {
+                        if (isCloudRequestAbort(error) || controller.signal.aborted || !currentSessionMatches(current)) throw error;
+                        const latest = await loadCloudMigrationRecord(current);
+                        assertRequestIdentity();
+                        if (cloudMigrationRecordMatchesExpected(latest, persisted)) {
+                            await persist({
+                                ...latest,
+                                status: "failed",
+                                error: {
+                                    code: "client_request_failed",
+                                    message: error instanceof Error ? error.message : "Cloud migration request failed",
+                                },
+                            });
+                        }
+                        throw error;
+                    }
                 });
-                throw error;
             } finally {
                 activeRequests.current.delete(requestKey);
+                if (requestControllers.current.get(requestKey) === controller) requestControllers.current.delete(requestKey);
                 changeBusy(current, -1);
             }
         },
         [changeBusy, persist, userId, workspaceId],
+    );
+
+    useEffect(
+        () => () => {
+            requestControllers.current.forEach((controller) => controller.abort(new DOMException("Cloud migration identity changed", "AbortError")));
+            requestControllers.current.clear();
+        },
+        [authenticated, userId, workspaceId],
     );
 
     useEffect(() => {
@@ -170,26 +215,28 @@ export function useCloudMigration() {
         activeRequests.current.add(startRequestKey);
         changeBusy(identity, 1);
         try {
-            await ensureCloudMigrationCanStart({ identity, loadedIdentityKey, currentRecord: record, loadRecord: loadCloudMigrationRecord });
-            const clientExportId = crypto.randomUUID();
-            const projects = useCanvasStore.getState().projects;
-            const { archive, counts } = await createCloudMigrationArchive(projects, useAssetStore.getState().assets, clientExportId);
-            if (!currentSessionMatches(identity)) {
-                throw new Error("Cloud migration identity changed before the archive was saved");
-            }
-            await ensureCloudMigrationCanStart({ identity, loadedIdentityKey, currentRecord: record, loadRecord: loadCloudMigrationRecord });
-            if (!currentSessionMatches(identity)) {
-                throw new Error("Cloud migration identity changed while the migration record was checked");
-            }
-            const prepared = await persist({
-                userId,
-                workspaceId,
-                clientExportId,
-                archive,
-                counts,
-                projectRevisions: Object.fromEntries(projects.map((project) => [project.id, project.updatedAt])),
-                createdAt: new Date().toISOString(),
-                status: "prepared",
+            const prepared = await withCloudMigrationLock(identity, async () => {
+                await ensureCloudMigrationCanStart({ identity, loadedIdentityKey, currentRecord: record, loadRecord: loadCloudMigrationRecord });
+                const clientExportId = crypto.randomUUID();
+                const projects = useCanvasStore.getState().projects;
+                const { archive, counts } = await createCloudMigrationArchive(projects, useAssetStore.getState().assets, clientExportId);
+                if (!currentSessionMatches(identity)) {
+                    throw new Error("Cloud migration identity changed before the archive was saved");
+                }
+                await ensureCloudMigrationCanStart({ identity, loadedIdentityKey, currentRecord: record, loadRecord: loadCloudMigrationRecord });
+                if (!currentSessionMatches(identity)) {
+                    throw new Error("Cloud migration identity changed while the migration record was checked");
+                }
+                return persist({
+                    userId,
+                    workspaceId,
+                    clientExportId,
+                    archive,
+                    counts,
+                    projectRevisions: Object.fromEntries(projects.map((project) => [project.id, project.updatedAt])),
+                    createdAt: new Date().toISOString(),
+                    status: "prepared",
+                });
             });
             await advance(prepared);
         } finally {
@@ -227,7 +274,12 @@ export function useCloudMigration() {
                     }),
                 );
             });
-            await persist({ ...record, activatedAt: record.activatedAt ?? new Date().toISOString() });
+            await withCloudMigrationLock(identity, async () => {
+                if (!currentSessionMatches(identity)) throw new Error("Cloud migration identity changed during activation");
+                const latest = await loadCloudMigrationRecord(identity);
+                if (!cloudMigrationRecordMatchesExpected(latest, record)) throw new Error("Cloud migration state changed during activation");
+                await persist({ ...latest, activatedAt: latest.activatedAt ?? new Date().toISOString() });
+            });
         } finally {
             changeBusy(identity, -1);
         }

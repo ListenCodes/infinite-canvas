@@ -5,12 +5,15 @@ import { annotateMigrationDocument, assertDurableMigrationAssets, assertMigratio
 import { parseCloudMigrationRollbackData, restoreCloudMigrationLocalAssets } from "../src/lib/canvas/cloud-migration-restore-core.ts";
 import { stageAndApplyCloudProjects } from "../src/pages/canvas/cloud-project-bootstrap-core.ts";
 import { OrderedPersistQueue } from "../src/stores/canvas/ordered-persist-queue.ts";
+import { assertCloudRequestIdentity, captureCloudRequestIdentity, isCloudRequestAbort } from "../src/services/api/cloud-request-identity.ts";
 import {
     cloudMigrationActivationMatches,
     cloudMigrationBelongsTo,
     cloudMigrationLoadRetryDelay,
+    cloudMigrationRecordMatchesExpected,
     cloudMigrationRecordKey,
     cloudProjectBindingMatchesIdentity,
+    cloudProjectBindingUnchanged,
     cloudProjectResponseMayUpdateBinding,
     ensureCloudMigrationCanStart,
     isCloudImportPublishedFor,
@@ -18,9 +21,28 @@ import {
     isCloudMigrationIdentityLoaded,
     localProjectsChangedSinceExport,
     updateCloudMigrationBusyCounts,
+    withCloudMigrationLock,
 } from "../src/services/cloud-migration-policy.ts";
 
 const accountA = { userId: "user-a", workspaceId: "workspace-a" };
+
+test("cloud requests cannot switch accounts while the session token is loading", () => {
+    const captured = captureCloudRequestIdentity({ authenticated: true, userId: "user-a", workspaceId: "workspace-a" });
+    assert.throws(() => assertCloudRequestIdentity(captured, "user-b", { authenticated: true, userId: "user-b", workspaceId: "workspace-b" }), { name: "AbortError" });
+    assert.throws(() => assertCloudRequestIdentity(captured, "user-a", { authenticated: true, userId: "user-a", workspaceId: "workspace-b" }), { name: "AbortError" });
+    assert.doesNotThrow(() => assertCloudRequestIdentity(captured, "user-a", { authenticated: true, userId: "user-a", workspaceId: "workspace-a" }));
+});
+
+test("session bootstrap is fenced to the Supabase user without requiring a stale workspace", () => {
+    const captured = captureCloudRequestIdentity({ authenticated: false, userId: null, workspaceId: null }, "user-b");
+    assert.doesNotThrow(() => assertCloudRequestIdentity(captured, "user-b", { authenticated: true, userId: "user-a", workspaceId: "workspace-a" }));
+    assert.throws(() => assertCloudRequestIdentity(captured, "user-a", { authenticated: true, userId: "user-a", workspaceId: "workspace-a" }), { name: "AbortError" });
+});
+
+test("identity aborts are control flow and never migration business failures", () => {
+    assert.equal(isCloudRequestAbort(new DOMException("changed", "AbortError")), true);
+    assert.equal(isCloudRequestAbort(new Error("provider failed")), false);
+});
 
 test("migration records are scoped to both user and workspace", () => {
     assert.notEqual(cloudMigrationRecordKey(accountA), cloudMigrationRecordKey({ userId: "user-b", workspaceId: "workspace-a" }));
@@ -82,6 +104,50 @@ test("migration start remains closed until the current identity record is loaded
     assert.equal(existing.clientExportId, "existing-export");
 });
 
+test("cloud migration uses one browser-wide identity lock and rejects stale records", async () => {
+    let tail = Promise.resolve();
+    const names = [];
+    const manager = {
+        request(name, _options, callback) {
+            names.push(name);
+            const result = tail.then(callback);
+            tail = result.catch(() => undefined);
+            return result;
+        },
+    };
+    const order = [];
+    let releaseFirst;
+    const first = withCloudMigrationLock(
+        accountA,
+        async () => {
+            order.push("first:start");
+            await new Promise((resolve) => {
+                releaseFirst = resolve;
+            });
+            order.push("first:end");
+        },
+        manager,
+    );
+    const second = withCloudMigrationLock(
+        accountA,
+        async () => {
+            order.push("second");
+        },
+        manager,
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(order, ["first:start"]);
+    releaseFirst();
+    await Promise.all([first, second]);
+    assert.deepEqual(order, ["first:start", "first:end", "second"]);
+    assert.equal(new Set(names).size, 1);
+
+    const expected = { ...accountA, clientExportId: "export-1", importId: "import-1", status: "importing" };
+    assert.equal(cloudMigrationRecordMatchesExpected({ ...expected }, expected), true);
+    assert.equal(cloudMigrationRecordMatchesExpected({ ...expected, status: "published" }, expected), false);
+    assert.equal(cloudMigrationRecordMatchesExpected({ ...expected, clientExportId: "export-2" }, expected), false);
+});
+
 test("migration record loading retries twice before requiring an explicit retry", () => {
     assert.equal(cloudMigrationLoadRetryDelay(1), 500);
     assert.equal(cloudMigrationLoadRetryDelay(2), 1_500);
@@ -102,6 +168,9 @@ test("cloud project bindings are valid only for the current account and workspac
     assert.equal(cloudProjectResponseMayUpdateBinding({ identity: accountA, capturedBinding: captured, latestBinding: { ...captured, version: 2 }, response }), false);
     assert.equal(cloudProjectResponseMayUpdateBinding({ identity: accountA, capturedBinding: undefined, latestBinding: { ...captured, version: 3 }, response }), false);
     assert.equal(cloudProjectResponseMayUpdateBinding({ identity: accountA, capturedBinding: captured, latestBinding: { ...captured, userId: "user-b" }, response }), false);
+    assert.equal(cloudProjectBindingUnchanged(captured, captured, accountA), true);
+    assert.equal(cloudProjectBindingUnchanged(captured, { ...captured, version: 2 }, accountA), false);
+    assert.equal(cloudProjectBindingUnchanged(undefined, captured, accountA), false);
 });
 
 test("migration activation detects edits, additions, and deletions after export", () => {

@@ -19,7 +19,10 @@ export function useCloudSession(): void {
         }
         let disposed = false;
         let revision = 0;
-        const refresh = async () => {
+        let retryTimer: number | undefined;
+        let bootstrapFailures = 0;
+        const refresh = async (resetFailures = false) => {
+            if (resetFailures) bootstrapFailures = 0;
             const currentRevision = ++revision;
             const { data } = await client.auth.getSession();
             if (disposed || currentRevision !== revision) return;
@@ -27,9 +30,13 @@ export function useCloudSession(): void {
                 useUserStore.getState().clearSession();
                 return;
             }
+            const sessionUserId = data.session.user.id;
+            const currentStore = useUserStore.getState();
+            if (currentStore.authenticated && currentStore.user?.id !== sessionUserId) currentStore.clearSession();
             try {
-                const bootstrap = await bootstrapCloudSession();
+                const bootstrap = await bootstrapCloudSession(sessionUserId);
                 if (disposed || currentRevision !== revision) return;
+                bootstrapFailures = 0;
                 useUserStore.getState().setCloudSession({
                     user: {
                         id: data.session.user.id,
@@ -43,13 +50,22 @@ export function useCloudSession(): void {
                     featureFlags: bootstrap.featureFlags,
                 });
             } catch {
-                if (!disposed && currentRevision === revision) useUserStore.getState().setAuthReady(true);
+                if (disposed || currentRevision !== revision) return;
+                useUserStore.getState().clearSession();
+                bootstrapFailures += 1;
+                if (bootstrapFailures <= 3) {
+                    retryTimer = window.setTimeout(() => void refresh(), [500, 1_500, 5_000][bootstrapFailures - 1]);
+                }
             }
         };
         void refresh();
-        const { data } = client.auth.onAuthStateChange(() => void refresh());
+        const { data } = client.auth.onAuthStateChange(() => {
+            if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+            void refresh(true);
+        });
         return () => {
             disposed = true;
+            if (retryTimer !== undefined) window.clearTimeout(retryTimer);
             data.subscription.unsubscribe();
         };
     }, []);
