@@ -59,13 +59,175 @@ function integrationWorkerConfig(databaseUrl: string, outboxBatchSize: number) {
   });
 }
 
+async function seedDispatcherRecoveryFixture(sql: postgres.Sql): Promise<string> {
+  const userId = randomUUID();
+  const workspaceId = randomUUID();
+  const projectId = randomUUID();
+  const channelId = randomUUID();
+  const modelId = randomUUID();
+  const idempotencyRequestId = randomUUID();
+  const batchId = randomUUID();
+
+  await sql.begin(async (transaction) => {
+    await transaction`select set_config('app.service_role', 'on', true)`;
+    await transaction`
+      insert into profiles (
+        user_id, display_name, cloud_projects_enabled, cloud_image_enabled,
+        cloud_video_enabled, cloud_credits_enabled
+      ) values (${userId}, 'Worker Recovery Fixture', true, true, true, true)
+    `;
+    await transaction`
+      insert into workspaces (id, owner_user_id, name)
+      values (${workspaceId}, ${userId}, 'Worker Recovery Fixture')
+    `;
+    await transaction`
+      insert into workspace_members (workspace_id, user_id, role)
+      values (${workspaceId}, ${userId}, 'owner')
+    `;
+    await transaction`
+      insert into projects (
+        id, workspace_id, created_by, client_project_id, title, document_json, updated_by
+      ) values (
+        ${projectId}, ${workspaceId}, ${userId}, 'worker-recovery-fixture',
+        'Worker Recovery Fixture',
+        ${jsonParameter(transaction, {
+          schemaVersion: 1,
+          localProjectId: "worker-recovery-fixture",
+          document: { nodes: [] },
+        })},
+        ${userId}
+      )
+    `;
+    await transaction`
+      insert into provider_channels (id, name, type, base_url, capabilities)
+      values (${channelId}, 'Worker Recovery Provider', 'grok2api', 'https://provider.example', '["image"]'::jsonb)
+    `;
+    const masterKey = Buffer.alloc(32);
+    const dataKey = randomBytes(32);
+    const nonce = randomBytes(12);
+    await transaction`
+      insert into provider_credentials (
+        id, channel_id, version, encrypted_secret, encrypted_data_key, nonce, key_id, secret_suffix
+      ) values (
+        ${randomUUID()}, ${channelId}, 1,
+        ${encrypt(dataKey, nonce, Buffer.from("worker-recovery-provider-secret"))},
+        ${encrypt(masterKey, nonce, dataKey)}, ${nonce.toString("base64")},
+        'integration', 'test'
+      )
+    `;
+    dataKey.fill(0);
+    await transaction`
+      insert into model_configs (
+        id, channel_id, model, capability, adapter_type, adapter_version, config_version,
+        limits_json, concurrency_limit, provider_idempotency_supported
+      ) values (
+        ${modelId}, ${channelId}, 'worker-recovery-image', 'image', 'grok2api', 1, 1,
+        '{"maxCount":6}'::jsonb, 3, false
+      )
+    `;
+    await transaction`
+      insert into provider_channel_capacity_policies (
+        channel_id, capability, version, concurrency_limit, rate_limit_per_minute
+      ) values (${channelId}, 'image', 1, 3, 60)
+    `;
+    await transaction`
+      insert into wallet_accounts (workspace_id, available, reserved)
+      values (${workspaceId}, 1000, 0)
+    `;
+    await transaction`
+      insert into idempotency_requests (
+        id, workspace_id, operation, key, request_hash, status,
+        response_status, response_body, expires_at
+      ) values (
+        ${idempotencyRequestId}, ${workspaceId}, 'batch.create', 'worker-recovery-fixture',
+        ${"a".repeat(64)}, 'completed', 201,
+        ${jsonParameter(transaction, { batchId })}, now() + interval '1 day'
+      )
+    `;
+    await transaction`
+      insert into generation_batches (
+        id, workspace_id, project_id, kind, requested_count,
+        idempotency_request_id, created_by
+      ) values (${batchId}, ${workspaceId}, ${projectId}, 'image', 6, ${idempotencyRequestId}, ${userId})
+    `;
+
+    for (let slotIndex = 0; slotIndex < 6; slotIndex += 1) {
+      const jobId = randomUUID();
+      const attemptId = randomUUID();
+      const dispatchToken = randomUUID();
+      await transaction`
+        insert into generation_jobs (
+          id, workspace_id, batch_id, slot_index, capability, model_config_id,
+          model_snapshot, price_snapshot, input_snapshot, estimated_credits
+        ) values (
+          ${jobId}, ${workspaceId}, ${batchId}, ${slotIndex}, 'image', ${modelId},
+          ${jsonParameter(transaction, { model: "worker-recovery-image" })},
+          ${jsonParameter(transaction, { version: 1, creditAmount: "10" })},
+          ${jsonParameter(transaction, {
+            input: {
+              prompt: `worker recovery slot ${slotIndex}`,
+              referenceAssetIds: [],
+              parameters: {},
+            },
+          })},
+          10
+        )
+      `;
+      await transaction`
+        insert into generation_attempts (
+          id, workspace_id, job_id, attempt_no, channel_id, credential_version,
+          adapter_type, adapter_version, provider_idempotency_supported, request_fingerprint,
+          business_deadline_at, executor_dispatch_token, capacity_policy_version,
+          workspace_concurrency_limit, workspace_rate_limit_per_minute,
+          channel_concurrency_limit, channel_rate_limit_per_minute
+        ) values (
+          ${attemptId}, ${workspaceId}, ${jobId}, ${slotIndex === 0 ? 2 : 1}, ${channelId}, 1,
+          'grok2api', 1, false, ${String(slotIndex).padStart(64, "0")},
+          now() + interval '30 minutes', ${dispatchToken}, 1, 3, 30, 3, 60
+        )
+      `;
+      await transaction`
+        update generation_jobs set current_attempt_id = ${attemptId} where id = ${jobId}
+      `;
+      await transaction`
+        select app.reserve_credits(
+          ${randomUUID()}, ${randomUUID()}, ${workspaceId}, ${jobId}, ${attemptId},
+          10, now() + interval '1 day'
+        )
+      `;
+      const payload = generationWorkflowInputSchema.parse({
+        schemaVersion: 2,
+        workflowName: "media-generation-v2",
+        workspaceId,
+        projectId,
+        batchId,
+        jobId,
+        attemptId,
+        capability: "image",
+        channelId,
+        capacity: integrationCapacity("image"),
+      });
+      await transaction`
+        insert into outbox_events (
+          id, workspace_id, topic, aggregate_id, dedupe_key, payload, available_at
+        ) values (
+          ${randomUUID()}, ${workspaceId}, 'generation.job.requested', ${jobId},
+          ${`worker-recovery:${attemptId}`}, ${jsonParameter(transaction, payload)},
+          now() + interval '1 day'
+        )
+      `;
+    }
+  });
+
+  return workspaceId;
+}
+
 test(
   "dispatcher outage and concurrent recovery trigger each pending attempt once",
   { skip: !adminUrl },
   async () => {
     assert.ok(adminUrl);
     const sql = postgres(runtimeUrl(adminUrl), { max: 6, prepare: false });
-    const workspaceId = "00000000-0000-4000-8000-00000000c101";
     const config = integrationWorkerConfig(runtimeUrl(adminUrl), 1);
     let failedRunLookups = 1;
     let triggerCalls = 0;
@@ -92,6 +254,7 @@ test(
     };
 
     try {
+      const workspaceId = await seedDispatcherRecoveryFixture(sql);
       const capacityRepository = new GenerationRepository(
         sql,
         config,
@@ -330,7 +493,10 @@ test(
 
       await sql.begin(async (transaction) => {
         await transaction`select set_config('app.service_role', 'on', true)`;
-        await transaction`update outbox_events set available_at = now() where workspace_id = ${workspaceId} and status = 'pending'`;
+        await transaction`
+          update outbox_events set available_at = timestamptz '2000-01-01 00:00:00+00'
+          where workspace_id = ${workspaceId} and status = 'pending'
+        `;
       });
       const recoveryConfig = { ...config, OUTBOX_BATCH_SIZE: 50 };
       const first = new OutboxDispatcher(
@@ -382,6 +548,56 @@ test(
 
       const staleOutbox = await sql.begin(async (transaction) => {
         await transaction`select set_config('app.service_role', 'on', true)`;
+        const staleCandidates = await transaction<{
+          attempt_id: string;
+          job_id: string;
+          channel_id: string;
+          credential_version: number;
+          adapter_type: string;
+          adapter_version: number;
+          provider_idempotency_supported: boolean;
+          request_fingerprint: string;
+          business_deadline_at: Date;
+          capacity_policy_version: number;
+          workspace_concurrency_limit: number;
+          workspace_rate_limit_per_minute: number;
+          channel_concurrency_limit: number;
+          channel_rate_limit_per_minute: number;
+        }[]>`
+          select attempt.id as attempt_id, attempt.job_id, attempt.channel_id,
+                 attempt.credential_version, attempt.adapter_type, attempt.adapter_version,
+                 attempt.provider_idempotency_supported, attempt.request_fingerprint,
+                 attempt.business_deadline_at, attempt.capacity_policy_version,
+                 attempt.workspace_concurrency_limit, attempt.workspace_rate_limit_per_minute,
+                 attempt.channel_concurrency_limit, attempt.channel_rate_limit_per_minute
+          from generation_attempts attempt
+          join generation_jobs job on job.id = attempt.job_id and job.current_attempt_id = attempt.id
+          where attempt.workspace_id = ${workspaceId} and attempt.attempt_no = 2
+          limit 1
+          for update of attempt
+        `;
+        const staleCandidate = staleCandidates[0];
+        assert.ok(staleCandidate);
+        const seededStaleAttemptId = randomUUID();
+        await transaction`
+          insert into generation_attempts (
+            id, workspace_id, job_id, attempt_no, channel_id, credential_version,
+            adapter_type, adapter_version, status, provider_idempotency_supported,
+            request_fingerprint, business_deadline_at, completed_at,
+            capacity_policy_version, workspace_concurrency_limit,
+            workspace_rate_limit_per_minute, channel_concurrency_limit,
+            channel_rate_limit_per_minute
+          ) values (
+            ${seededStaleAttemptId}, ${workspaceId}, ${staleCandidate.job_id}, 1,
+            ${staleCandidate.channel_id}, ${staleCandidate.credential_version},
+            ${staleCandidate.adapter_type}, ${staleCandidate.adapter_version}, 'failed',
+            ${staleCandidate.provider_idempotency_supported}, ${staleCandidate.request_fingerprint},
+            ${staleCandidate.business_deadline_at}, now(),
+            ${staleCandidate.capacity_policy_version}, ${staleCandidate.workspace_concurrency_limit},
+            ${staleCandidate.workspace_rate_limit_per_minute}, ${staleCandidate.channel_concurrency_limit},
+            ${staleCandidate.channel_rate_limit_per_minute}
+          )
+        `;
         const rows = await transaction<
           {
             job_id: string;
@@ -430,7 +646,7 @@ test(
               channelId: current.channel_id,
               capacity: integrationCapacity(current.capability),
             })},
-            9, now() - interval '1 second', now() - interval '31 minutes'
+            9, timestamptz '1990-01-01 00:00:00+00', now() - interval '31 minutes'
           )
         `;
         return { ...current, outbox_id: outboxId };
