@@ -102,7 +102,7 @@ function adminJobProjection(row: any) {
     providerTaskId: row.provider_task_id,
     errorCode: row.error_code,
     errorMessage: row.error_message,
-    evidence: row.evidence_json,
+    evidence: row.evidence_json ?? {},
     businessDeadlineAt: row.business_deadline_at?.toISOString?.() ?? row.business_deadline_at,
     outcomeUnknownAt: row.outcome_unknown_at?.toISOString?.() ?? row.outcome_unknown_at ?? null,
     reconcileAfter: row.reconcile_after?.toISOString?.() ?? row.reconcile_after ?? null,
