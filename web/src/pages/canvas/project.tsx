@@ -66,6 +66,7 @@ import {
     sourceNodeReferenceImages,
 } from "@/lib/canvas/canvas-generation-helpers";
 import { settleCanceledGeneration } from "@/lib/canvas/canvas-generation-state";
+import { finishCanvasGenerationRequest, replaceCanvasGenerationRequest, type CanvasGenerationRequest } from "@/lib/canvas/canvas-generation-requests";
 import { getNodeDefinition, isBuiltinNodeType as isBuiltinType, useNodeRegistryVersion } from "@/lib/canvas/node-registry";
 import { registerBuiltinNodes } from "@/components/canvas/nodes/builtin-nodes";
 import { CanvasPluginManagerModal } from "@/components/canvas/canvas-plugin-manager-modal";
@@ -114,13 +115,6 @@ type CanvasHistoryEntry = Pick<CanvasClipboard, "nodes" | "connections"> & {
     activeChatId: string | null;
     backgroundMode: CanvasBackgroundMode;
     showImageInfo: boolean;
-};
-
-type CanvasGenerationRequest = {
-    targetNodeId: string;
-    originNodeId: string;
-    runningNodeId: string;
-    controller: AbortController;
 };
 
 const VIDEO_NODE_MAX_WIDTH = 420;
@@ -280,29 +274,59 @@ function InfiniteCanvasPage() {
     );
 
     const startGenerationRequest = useCallback(
-        (targetNodeId: string, originNodeId: string, runningId = originNodeId, controller = new AbortController()) => {
-            const previous = generationRequestsRef.current.get(targetNodeId);
-            if (previous && previous.controller !== controller) {
-                previous.controller.abort();
-                const canceledTargetIds = new Set<string>();
-                generationRequestsRef.current.forEach((request, key) => {
-                    if (request.controller !== previous.controller) return;
-                    canceledTargetIds.add(request.targetNodeId);
-                    generationRequestsRef.current.delete(key);
-                });
-                if (canceledTargetIds.size) {
-                    setNodes((current) => current.map((node) => (canceledTargetIds.has(node.id) && node.metadata?.status === NODE_STATUS_LOADING ? settleCanceledGeneration(node, t("common.requestCanceled"), node.type === CanvasNodeType.Image) : node)));
+        (targetNodeId: string, originNodeId: string, runningId = originNodeId, controller = new AbortController(), requestKey = targetNodeId, slotId?: string) => {
+            const canceled = replaceCanvasGenerationRequest(generationRequestsRef.current, requestKey, {
+                targetNodeId,
+                originNodeId,
+                runningNodeId: runningId,
+                controller,
+                ...(slotId ? { slotId } : {}),
+            });
+            if (canceled.length) {
+                const canceledTargets = new Map<string, Set<string> | null>();
+                for (const { request } of canceled) {
+                    const current = canceledTargets.get(request.targetNodeId);
+                    if (!request.slotId) {
+                        canceledTargets.set(request.targetNodeId, null);
+                    } else if (current !== null) {
+                        const slots = current ?? new Set<string>();
+                        slots.add(request.slotId);
+                        canceledTargets.set(request.targetNodeId, slots);
+                    }
                 }
+                setNodes((current) =>
+                    current.map((node) => {
+                        const canceledSlots = canceledTargets.get(node.id);
+                        if (canceledSlots === undefined || node.metadata?.status !== NODE_STATUS_LOADING) return node;
+                        if (canceledSlots === null || node.type !== CanvasNodeType.Image) {
+                            return settleCanceledGeneration(node, t("common.requestCanceled"), node.type === CanvasNodeType.Image);
+                        }
+                        const images = node.metadata.images?.map((image) =>
+                            canceledSlots.has(image.id) && image.status === NODE_STATUS_LOADING
+                                ? { ...image, status: NODE_STATUS_ERROR, errorDetails: t("common.requestCanceled") }
+                                : image,
+                        );
+                        const hasLoading = images?.some((image) => image.status === NODE_STATUS_LOADING);
+                        const hasSuccess = Boolean(node.metadata.content) || Boolean(images?.some((image) => image.status === NODE_STATUS_SUCCESS));
+                        return {
+                            ...node,
+                            metadata: {
+                                ...node.metadata,
+                                images,
+                                status: hasLoading ? NODE_STATUS_LOADING : hasSuccess ? NODE_STATUS_SUCCESS : NODE_STATUS_IDLE,
+                                errorDetails: hasLoading || hasSuccess ? undefined : t("common.requestCanceled"),
+                            },
+                        };
+                    }),
+                );
             }
-            generationRequestsRef.current.set(targetNodeId, { targetNodeId, originNodeId, runningNodeId: runningId, controller });
             return controller;
         },
         [t],
     );
 
-    const finishGenerationRequest = useCallback((targetNodeId: string, controller: AbortController) => {
-        const request = generationRequestsRef.current.get(targetNodeId);
-        if (request?.controller === controller) generationRequestsRef.current.delete(targetNodeId);
+    const finishGenerationRequest = useCallback((requestKey: string, controller: AbortController) => {
+        finishCanvasGenerationRequest(generationRequestsRef.current, requestKey, controller);
     }, []);
 
     const cloudIdentityRef = useRef(cloudSync.identityKey);
@@ -323,7 +347,7 @@ function InfiniteCanvasPage() {
             if (persistedTarget?.metadata?.cloudJob && !["succeeded", "failed", "canceled", "outcome_unknown", "cancel_requested"].includes(persistedTarget.metadata.cloudJob.serverStatus)) {
                 cloudJobIds.add(persistedTarget.metadata.cloudJob.jobId);
             }
-            generationRequestsRef.current.forEach((request) => {
+            generationRequestsRef.current.forEach((request, requestKey) => {
                 if (request.runningNodeId !== runningId) return;
                 const target = nodesRef.current.find((node) => node.id === request.targetNodeId);
                 const activeCloudJobs = target?.metadata?.images?.flatMap((image) => (image.cloud && !["succeeded", "failed", "canceled", "outcome_unknown", "cancel_requested"].includes(image.cloud.serverStatus) ? [image.cloud.jobId] : [])) || [];
@@ -331,7 +355,7 @@ function InfiniteCanvasPage() {
                 activeCloudJobs.forEach((jobId) => cloudJobIds.add(jobId));
                 if (activeCloudJobs.length) return;
                 request.controller.abort();
-                generationRequestsRef.current.delete(request.targetNodeId);
+                generationRequestsRef.current.delete(requestKey);
                 affectedNodeIds.add(request.targetNodeId);
                 affectedNodeIds.add(request.originNodeId);
             });
@@ -2599,7 +2623,8 @@ function InfiniteCanvasPage() {
                 }
                 const retryMode = cloudImageRetryMode(cloudImage);
                 if (!retryMode) return;
-                const controller = startGenerationRequest(node.id, node.id, node.id);
+                const requestKey = `${node.id}:image:${imageId}`;
+                const controller = startGenerationRequest(node.id, node.id, node.id, new AbortController(), requestKey, imageId);
                 setRunningNodeId(node.id);
                 if (retryMode === "materialize") {
                     setNodes((prev) =>
@@ -2621,8 +2646,10 @@ function InfiniteCanvasPage() {
                     } catch (error) {
                         if (!isGenerationCanceled(error)) message.error(error instanceof Error ? error.message : t("canvas.projectPage.generationFailed"));
                     } finally {
-                        finishGenerationRequest(node.id, controller);
-                        setRunningNodeId((current) => (current === node.id ? null : current));
+                        finishGenerationRequest(requestKey, controller);
+                        if (![...generationRequestsRef.current.values()].some((request) => request.runningNodeId === node.id)) {
+                            setRunningNodeId((current) => (current === node.id ? null : current));
+                        }
                     }
                     return;
                 }
@@ -2675,8 +2702,10 @@ function InfiniteCanvasPage() {
                         );
                     }
                 } finally {
-                    finishGenerationRequest(node.id, controller);
-                    setRunningNodeId((current) => (current === node.id ? null : current));
+                    finishGenerationRequest(requestKey, controller);
+                    if (![...generationRequestsRef.current.values()].some((request) => request.runningNodeId === node.id)) {
+                        setRunningNodeId((current) => (current === node.id ? null : current));
+                    }
                 }
                 return;
             }

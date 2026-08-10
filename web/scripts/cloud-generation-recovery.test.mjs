@@ -7,6 +7,7 @@ import { abortCloudIdentityRequests, cloudIdentityRequestMayContinue, cloudImage
 import { ActiveGenerationWatchRegistry, CLOUD_GENERATION_CURSOR_SCAN_MS, CloudGenerationWakeChannel, runCloudGenerationEventPump, waitForCloudGenerationCursorScan } from "../src/pages/canvas/cloud-generation-watch-core.ts";
 import { aggregateCloudImageStatus, mergeCloudImageJobStates } from "../src/pages/canvas/cloud-image-state-core.ts";
 import { clearCloudUploadRetryKey, getOrCreateCloudUploadRetryKey, rotateCloudUploadRetryKey } from "../src/services/api/cloud-upload-retry.ts";
+import { finishCanvasGenerationRequest, replaceCanvasGenerationRequest } from "../src/lib/canvas/canvas-generation-requests.ts";
 
 const workspaceId = "00000000-0000-4000-8000-000000000101";
 const projectId = "00000000-0000-4000-8000-000000000201";
@@ -25,6 +26,37 @@ test("identity changes abort every shared generation controller before another A
     assert.equal(independent.signal.aborted, true);
     assert.equal(cloudIdentityRequestMayContinue(shared.signal), false);
     assert.equal(requests.size, 0);
+});
+
+test("image slot request keys preserve concurrent retries on the same node", () => {
+    const requests = new Map();
+    const first = new AbortController();
+    const second = new AbortController();
+    const replacement = new AbortController();
+    const request = (slotId, controller) => ({
+        targetNodeId: "image-node",
+        originNodeId: "image-node",
+        runningNodeId: "image-node",
+        slotId,
+        controller,
+    });
+
+    assert.deepEqual(replaceCanvasGenerationRequest(requests, "image-node:image:slot-2", request("slot-2", first)), []);
+    assert.deepEqual(replaceCanvasGenerationRequest(requests, "image-node:image:slot-3", request("slot-3", second)), []);
+    assert.equal(first.signal.aborted, false);
+    assert.equal(second.signal.aborted, false);
+    assert.equal(requests.size, 2);
+
+    const canceled = replaceCanvasGenerationRequest(requests, "image-node:image:slot-2", request("slot-2", replacement));
+    assert.equal(first.signal.aborted, true);
+    assert.equal(second.signal.aborted, false);
+    assert.deepEqual(canceled.map(({ key }) => key), ["image-node:image:slot-2"]);
+    assert.equal(requests.size, 2);
+
+    finishCanvasGenerationRequest(requests, "image-node:image:slot-2", first);
+    assert.equal(requests.size, 2);
+    finishCanvasGenerationRequest(requests, "image-node:image:slot-2", replacement);
+    assert.equal(requests.size, 1);
 });
 
 function event(sequence) {
