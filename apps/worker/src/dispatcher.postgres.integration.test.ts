@@ -41,6 +41,24 @@ function integrationCapacity(capability: "image" | "video") {
   };
 }
 
+function integrationWorkerConfig(databaseUrl: string, outboxBatchSize: number) {
+  return loadWorkerConfig({
+    NODE_ENV: "test",
+    BUSINESS_DATABASE_URL: databaseUrl,
+    SUPABASE_URL: "https://supabase.invalid",
+    SUPABASE_SERVICE_ROLE_KEY: "integration-service-role-key",
+    HATCHET_MODE: "cloud",
+    HATCHET_CLIENT_TOKEN: "integration-token",
+    OUTBOX_BATCH_SIZE: String(outboxBatchSize),
+    CREDENTIAL_MASTER_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    S3_REGION: "test",
+    S3_ENDPOINT: "https://storage.example",
+    S3_BUCKET: "test",
+    S3_ACCESS_KEY_ID: "test-access",
+    S3_SECRET_ACCESS_KEY: "test-secret",
+  });
+}
+
 test(
   "dispatcher outage and concurrent recovery trigger each pending attempt once",
   { skip: !adminUrl },
@@ -48,19 +66,7 @@ test(
     assert.ok(adminUrl);
     const sql = postgres(runtimeUrl(adminUrl), { max: 6, prepare: false });
     const workspaceId = "00000000-0000-4000-8000-00000000c101";
-    const config = loadWorkerConfig({
-      NODE_ENV: "test",
-      BUSINESS_DATABASE_URL: runtimeUrl(adminUrl),
-      HATCHET_MODE: "cloud",
-      HATCHET_CLIENT_TOKEN: "integration-token",
-      OUTBOX_BATCH_SIZE: "1",
-      CREDENTIAL_MASTER_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-      S3_REGION: "test",
-      S3_ENDPOINT: "https://storage.example",
-      S3_BUCKET: "test",
-      S3_ACCESS_KEY_ID: "test-access",
-      S3_SECRET_ACCESS_KEY: "test-secret",
-    });
+    const config = integrationWorkerConfig(runtimeUrl(adminUrl), 1);
     let failedRunLookups = 1;
     let triggerCalls = 0;
     const acceptedAttempts = new Set<string>();
@@ -1217,19 +1223,7 @@ test(
     const sql = postgres(runtimeUrl(adminUrl), { max: 6, prepare: false });
     const workspaceId = "00000000-0000-4000-8000-00000000c102";
     const channelId = "00000000-0000-4000-8000-00000000c302";
-    const config = loadWorkerConfig({
-      NODE_ENV: "test",
-      BUSINESS_DATABASE_URL: runtimeUrl(adminUrl),
-      HATCHET_MODE: "cloud",
-      HATCHET_CLIENT_TOKEN: "integration-token",
-      OUTBOX_BATCH_SIZE: "3",
-      CREDENTIAL_MASTER_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-      S3_REGION: "test",
-      S3_ENDPOINT: "https://storage.example",
-      S3_BUCKET: "test",
-      S3_ACCESS_KEY_ID: "test-access",
-      S3_SECRET_ACCESS_KEY: "test-secret",
-    });
+    const config = integrationWorkerConfig(runtimeUrl(adminUrl), 3);
     const dispatched: {
       workflow: string;
       input: ReturnType<typeof generationWorkflowInputSchema.parse> & { dispatchToken: string };
