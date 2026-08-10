@@ -18,6 +18,7 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "pretest": "npm run build:libs",
     "test": "npm run test --workspaces --if-present",
+    "pretest:postgres": "npm run build:libs",
     "test:postgres": "node scripts/run-postgres-tests.mjs",
     "recovery:audit": "npm run recovery:audit -w @infinite-canvas/worker",
     "recovery:drill": "node scripts/recovery/run-local-drill.mjs",

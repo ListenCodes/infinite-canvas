@@ -745,3 +745,11 @@ test("PostgreSQL fixture types dynamic role parameters before format", async () 
     2,
   );
 });
+
+test("PostgreSQL integration entrypoint builds workspace libraries in a fresh checkout", async () => {
+  const rootPackage = JSON.parse(
+    await readFile(resolve(repository, "package.json"), "utf8"),
+  );
+  assert.equal(rootPackage.scripts?.["pretest:postgres"], "npm run build:libs");
+  assert.equal(rootPackage.scripts?.["test:postgres"], "node scripts/run-postgres-tests.mjs");
+});
