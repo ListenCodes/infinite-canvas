@@ -31,13 +31,15 @@ the final remaining administrator.
 ## Unknown outcomes
 
 Use the reconciliation view only with authoritative evidence. Every action requires
-an `Idempotency-Key`, reason, and evidence summary.
+an `Idempotency-Key`, reason, and a redacted evidence object with nonempty `source`
+and `reference` fields. The reference should identify a provider-console case,
+signed audit export, or incident record without embedding credentials.
 
 | Resolution | Required evidence | Result |
 |---|---|---|
 | Not accepted | Provider request/audit proves no task was created | Fail and release |
 | Provider failed | Authoritative terminal failure | Fail and release |
-| Accepted | Provider task ID | Resume polling with the same attempt |
+| Accepted | Provider task ID | Resume polling with the same attempt and a new bounded 30-minute execution window |
 | Provider succeeded | Stable media URL and provider evidence | Resume materialization and settle after storage |
 
 Do not manually mark success without a recoverable asset. Do not release accepted

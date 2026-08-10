@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import { PGlite } from "@electric-sql/pglite";
 
-import { collectMigrationFiles } from "./migration-runner.js";
+import { bindMigrationOrder, collectMigrationFiles, validateMigrationLedger } from "./migration-runner.js";
 
 const packageDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const migrationsDir = resolve(packageDir, "migrations");
@@ -72,6 +72,7 @@ test("initial migrations enforce tenant, execution, outbox, and wallet invariant
       "custom/0011_executor_dispatch_fence.sql",
       "drizzle/0009_adorable_captain_midlands.sql",
       "drizzle/0010_clammy_susan_delgado.sql",
+      "custom/0012_runtime_acl_hardening.sql",
     ]);
     await applyMigrations(db);
 
@@ -221,6 +222,8 @@ test("initial migrations enforce tenant, execution, outbox, and wallet invariant
     await db.exec(`
       create role infinite_canvas_test;
       grant usage on schema public, app to infinite_canvas_test;
+      grant execute on function app.current_user_id(), app.is_service_role(), app.is_platform_admin(), app.has_workspace_access(uuid, workspace_role[])
+        to infinite_canvas_test;
       grant select on profiles, workspaces, workspace_members, projects to infinite_canvas_test;
       set role infinite_canvas_test;
       select set_config('app.user_id', '${ids.userA}', false);
@@ -271,6 +274,8 @@ test("an untrusted login cannot forge service role through SECURITY DEFINER help
         values ('${ids.projectA}', '${ids.workspaceA}', 'Project A', '{}', '${ids.userA}');
       create role infinite_canvas_attacker;
       grant usage on schema app, public to infinite_canvas_attacker;
+      grant execute on function app.current_user_id(), app.is_service_role(), app.is_platform_admin(), app.has_workspace_access(uuid, workspace_role[])
+        to infinite_canvas_attacker;
       grant select, update on profiles, workspaces, workspace_members, projects to infinite_canvas_attacker;
       set session authorization infinite_canvas_attacker;
       select set_config('app.user_id', '', false);
@@ -282,6 +287,49 @@ test("an untrusted login cannot forge service role through SECURITY DEFINER help
     assert.deepEqual(forgedVisible.rows, []);
     const forgedUpdate = await db.query<{ id: string }>(`update projects set title = 'stolen' where id = $1 returning id`, [ids.projectA]);
     assert.deepEqual(forgedUpdate.rows, []);
+  } finally {
+    await db.close();
+  }
+});
+
+test("recovery service members can read through RLS helpers but cannot execute write functions", async () => {
+  const db = new PGlite();
+  try {
+    await db.exec(`
+      create role infinite_canvas_service nologin noinherit;
+      create role infinite_canvas_recovery_test noinherit;
+      grant infinite_canvas_service to infinite_canvas_recovery_test;
+    `);
+    await applyMigrations(db);
+    await db.exec(`
+      grant usage on schema public, app to infinite_canvas_recovery_test;
+      set session authorization infinite_canvas_recovery_test;
+    `);
+    const privileges = await db.query<{
+      helper: boolean;
+      claim_outbox: boolean;
+      reserve: boolean;
+      release: boolean;
+      refresh_batch: boolean;
+    }>(`
+      select
+        has_function_privilege(current_user, 'app.is_service_role()', 'EXECUTE') as helper,
+        has_function_privilege(current_user, 'app.claim_outbox(text,integer)', 'EXECUTE') as claim_outbox,
+        has_function_privilege(current_user, 'app.reserve_credits(uuid,uuid,uuid,uuid,uuid,bigint,timestamptz)', 'EXECUTE') as reserve,
+        has_function_privilege(current_user, 'app.release_reservation(uuid,uuid,text)', 'EXECUTE') as release,
+        has_function_privilege(current_user, 'app.refresh_generation_batch(uuid)', 'EXECUTE') as refresh_batch
+    `);
+    assert.deepEqual(privileges.rows[0], {
+      helper: true,
+      claim_outbox: false,
+      reserve: false,
+      release: false,
+      refresh_batch: false,
+    });
+    await assert.rejects(
+      db.query(`select app.refresh_generation_batch($1)`, [ids.batch]),
+      /permission denied/i,
+    );
   } finally {
     await db.close();
   }
@@ -302,6 +350,42 @@ test("migration order rejects generated SQL that was not explicitly appended", a
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("migration ledger rejects checksum drift, unknown rows, holes, and manifest reorder", () => {
+  const prepared = bindMigrationOrder([
+    { name: "0001.sql", checksum: "a".repeat(64) },
+    { name: "0002.sql", checksum: "b".repeat(64) },
+    { name: "0003.sql", checksum: "c".repeat(64) },
+  ]);
+  const applied = prepared.map((migration) => ({
+    name: migration.name,
+    sha256: migration.checksum,
+    manifest_position: migration.position,
+    prefix_hash: migration.prefixHash,
+  }));
+  validateMigrationLedger(prepared, applied);
+  assert.throws(
+    () => validateMigrationLedger(prepared, [{ ...applied[0]!, sha256: "f".repeat(64) }]),
+    /Applied migration changed/,
+  );
+  assert.throws(
+    () => validateMigrationLedger(prepared, [...applied, { name: "unknown.sql", sha256: "d".repeat(64), manifest_position: 3, prefix_hash: "e".repeat(64) }]),
+    /unknown migrations/,
+  );
+  assert.throws(
+    () => validateMigrationLedger(prepared, [applied[0]!, applied[2]!]),
+    /not a prefix/,
+  );
+  const reordered = bindMigrationOrder([
+    { name: "0002.sql", checksum: "b".repeat(64) },
+    { name: "0001.sql", checksum: "a".repeat(64) },
+    { name: "0003.sql", checksum: "c".repeat(64) },
+  ]);
+  assert.throws(
+    () => validateMigrationLedger(reordered, applied),
+    /order changed|prefix changed/,
+  );
 });
 
 test("schema evolution backfills legacy jobs and reclaims legacy verifying assets", async () => {

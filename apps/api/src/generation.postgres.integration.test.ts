@@ -411,6 +411,77 @@ test("ten concurrent idempotent creates and failed-slot retries preserve exact c
         1000n,
         randomUUID,
       );
+      const unknownCandidate = afterRetry.jobs.find(({ jobId }) => jobId === failed[0]!.jobId);
+      assert.ok(unknownCandidate);
+      await sql.begin(async (transaction) => {
+        await transaction`select set_config('app.service_role', 'on', true)`;
+        await transaction`
+          update generation_attempts
+          set status = 'outcome_unknown', business_deadline_at = now() - interval '2 hours',
+              outcome_unknown_at = now() - interval '1 hour', reconcile_after = now(),
+              release_after = now() + interval '23 hours', error_code = 'provider_outcome_unknown'
+          where id = ${unknownCandidate.attemptId}
+        `;
+        await transaction`
+          update generation_jobs set status = 'outcome_unknown', version = version + 1
+          where id = ${unknownCandidate.jobId}
+        `;
+      });
+      const resolvedUnknown = await idempotencyAdminService.resolveUnknown(
+        userId,
+        unknownCandidate.attemptId,
+        {
+          resolution: "accepted",
+          providerTaskId: "provider-task-confirmed-0001",
+          reason: "Provider console confirms task acceptance",
+          evidence: { source: "provider_console", reference: "case-accepted-0001" },
+        },
+        "unknown-accepted-resolution-0001",
+      );
+      assert.equal(resolvedUnknown.status, "waiting_provider");
+      const reconciled = await sql.begin(async (transaction) => {
+        await transaction`select set_config('app.service_role', 'on', true)`;
+        return transaction<{
+          attempt_status: string;
+          job_status: string;
+          provider_task_id: string;
+          deadline_extended: boolean;
+          reconcile_after: Date | null;
+          release_after: Date | null;
+          reservation_status: string;
+          recovery_outbox: number;
+        }[]>`
+          select attempt.status as attempt_status, job.status as job_status, attempt.provider_task_id,
+                 attempt.business_deadline_at >= now() + interval '29 minutes' as deadline_extended,
+                 attempt.reconcile_after, attempt.release_after, reservation.status as reservation_status,
+                 (select count(*)::int from outbox_events event
+                  where event.aggregate_id = job.id and event.dedupe_key = 'generation.job.reconciled:' || attempt.id::text || ':unknown-accepted-resolution-0001') as recovery_outbox
+          from generation_attempts attempt
+          join generation_jobs job on job.current_attempt_id = attempt.id
+          join credit_reservations reservation on reservation.attempt_id = attempt.id
+          where attempt.id = ${unknownCandidate.attemptId}
+        `;
+      });
+      assert.deepEqual(reconciled[0], {
+        attempt_status: "accepted",
+        job_status: "waiting_provider",
+        provider_task_id: "provider-task-confirmed-0001",
+        deadline_extended: true,
+        reconcile_after: null,
+        release_after: null,
+        reservation_status: "reserved",
+        recovery_outbox: 1,
+      });
+      const reconciledProjection = (await idempotencyAdminService.jobsPage({ limit: 100 })).items.find(
+        (item) => item.attemptId === unknownCandidate.attemptId,
+      );
+      assert.ok(reconciledProjection);
+      assert.equal(reconciledProjection.channelId, channelId);
+      assert.deepEqual(reconciledProjection.evidence, { source: "provider_console", reference: "case-accepted-0001" });
+      assert.equal(reconciledProjection.reservationStatus, "reserved");
+      assert.equal(reconciledProjection.reservedCredits, "10");
+      assert.ok(reconciledProjection.outbox.length > 0);
+      assert.deepEqual(reconciledProjection.ledgerKinds, ["reserve"]);
       const channelKey = "admin-channel-create-lost-response-0001";
       const channelResponses = await Promise.all(
         Array.from({ length: 10 }, () =>

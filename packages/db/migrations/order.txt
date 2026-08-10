@@ -18,3 +18,4 @@ custom/0010_platform_idempotency.sql
 custom/0011_executor_dispatch_fence.sql
 drizzle/0009_adorable_captain_midlands.sql
 drizzle/0010_clammy_susan_delgado.sql
+custom/0012_runtime_acl_hardening.sql

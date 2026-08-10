@@ -83,6 +83,17 @@ owner or `BYPASSRLS` roles. Never fall back from
    The canonical manifest records the stable workflow run ID but excludes the
    mutable run-attempt number so an unchanged release can be rerun byte-for-byte.
 
+For a tag build, the workflow creates a draft GitHub Release containing the complete
+three-image manifest before it writes any immutable SHA or version tag. A failed
+promotion rerun downloads and reuses that persisted set even if a rebuild would
+produce different bytes. Operators and deployment automation must treat only a
+published Release with both manifest files as ready; candidate tags and a draft
+Release are not a deployment signal.
+The combined-restore drill is then rerun against the exact API and Worker digest
+references from that manifest. Its redacted evidence records the manifest SHA-256
+and all three image references, and `combined-restore.json` is retained with the
+published Release instead of relying on the short-lived Actions artifact alone.
+
 For OSS, Compose waits for `hatchet-engine:/ready` and
 `hatchet-dashboard:/api/ready` before starting the Worker. The dashboard embeds
 the REST API in v0.101.12; `HATCHET_CLIENT_API_URL=http://hatchet-dashboard` is

@@ -15,7 +15,9 @@ import {
     cloudMigrationBelongsTo,
     cloudMigrationRecordKey,
     isCloudImportPublishedFor,
+    isCloudMigrationBusy,
     localProjectsChangedSinceExport,
+    updateCloudMigrationBusyCounts,
 } from "../src/services/cloud-migration-policy.ts";
 
 const accountA = { userId: "user-a", workspaceId: "workspace-a" };
@@ -29,6 +31,21 @@ test("migration records are scoped to both user and workspace", () => {
     assert.equal(isCloudImportPublishedFor({ userId: "user-b", workspaceId: "workspace-a", clientExportId: "export-1" }, accountA), false);
     assert.equal(cloudMigrationActivationMatches({ ...accountA, clientExportId: "export-1" }, { ...accountA, clientExportId: "export-1" }), true);
     assert.equal(cloudMigrationActivationMatches({ ...accountA, clientExportId: "export-1" }, { ...accountA, clientExportId: "export-other" }), false);
+});
+
+test("migration busy state is scoped to the current account and workspace", () => {
+    const accountB = { userId: "user-b", workspaceId: "workspace-b" };
+    let counts = updateCloudMigrationBusyCounts({}, accountA, 1);
+    assert.equal(isCloudMigrationBusy(counts, accountA), true);
+    assert.equal(isCloudMigrationBusy(counts, accountB), false);
+
+    counts = updateCloudMigrationBusyCounts(counts, accountB, 1);
+    counts = updateCloudMigrationBusyCounts(counts, accountA, -1);
+    assert.equal(isCloudMigrationBusy(counts, accountA), false);
+    assert.equal(isCloudMigrationBusy(counts, accountB), true);
+
+    counts = updateCloudMigrationBusyCounts(counts, accountB, -1);
+    assert.deepEqual(counts, {});
 });
 
 test("migration activation detects edits, additions, and deletions after export", () => {

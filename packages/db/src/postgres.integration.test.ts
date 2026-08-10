@@ -49,6 +49,7 @@ test("real PostgreSQL enforces migrations, runtime roles, RLS, and LISTEN/NOTIFY
     "custom/0011_executor_dispatch_fence.sql",
     "drizzle/0009_adorable_captain_midlands.sql",
     "drizzle/0010_clammy_susan_delgado.sql",
+    "custom/0012_runtime_acl_hardening.sql",
   ]);
   assert.deepEqual(await migrateDatabase(migrationUrl), []);
 
@@ -97,24 +98,51 @@ test("real PostgreSQL enforces migrations, runtime roles, RLS, and LISTEN/NOTIFY
       ) as allowed
     `;
     assert.equal(claimPrivilege[0]?.allowed, true);
-    const recoveryPrivileges = await admin<{ claim: boolean; can_select: boolean; can_update: boolean; can_select_migrations: boolean; can_update_migrations: boolean }[]>`
+    const recoveryPrivileges = await admin<{
+      claim: boolean;
+      release: boolean;
+      refresh_batch: boolean;
+      helper: boolean;
+      can_select: boolean;
+      can_update: boolean;
+      can_select_platform_idempotency: boolean;
+      can_update_platform_idempotency: boolean;
+      can_select_migrations: boolean;
+      can_update_migrations: boolean;
+      api_can_update_future_table: boolean;
+      worker_can_update_future_table: boolean;
+    }[]>`
       select
         has_function_privilege(
           'infinite_canvas_recovery_test',
           'app.claim_generation_attempt(uuid,uuid,uuid,uuid,uuid,uuid,generation_capability,uuid,text)',
           'EXECUTE'
         ) as claim,
+        has_function_privilege('infinite_canvas_recovery_test', 'app.release_reservation(uuid,uuid,text)', 'EXECUTE') as release,
+        has_function_privilege('infinite_canvas_recovery_test', 'app.refresh_generation_batch(uuid)', 'EXECUTE') as refresh_batch,
+        has_function_privilege('infinite_canvas_recovery_test', 'app.is_service_role()', 'EXECUTE') as helper,
         has_table_privilege('infinite_canvas_recovery_test', 'generation_attempts', 'SELECT') as can_select,
         has_table_privilege('infinite_canvas_recovery_test', 'generation_attempts', 'UPDATE') as can_update,
+        has_table_privilege('infinite_canvas_recovery_test', 'platform_idempotency_requests', 'SELECT') as can_select_platform_idempotency,
+        has_table_privilege('infinite_canvas_recovery_test', 'platform_idempotency_requests', 'UPDATE') as can_update_platform_idempotency,
         has_table_privilege('infinite_canvas_recovery_test', 'app_schema_migrations', 'SELECT') as can_select_migrations,
-        has_table_privilege('infinite_canvas_recovery_test', 'app_schema_migrations', 'UPDATE') as can_update_migrations
+        has_table_privilege('infinite_canvas_recovery_test', 'app_schema_migrations', 'UPDATE') as can_update_migrations,
+        has_table_privilege('infinite_canvas_api_test', 'platform_idempotency_requests', 'UPDATE') as api_can_update_future_table,
+        has_table_privilege('infinite_canvas_worker_test', 'platform_idempotency_requests', 'UPDATE') as worker_can_update_future_table
     `;
     assert.deepEqual(recoveryPrivileges[0], {
       claim: false,
+      release: false,
+      refresh_batch: false,
+      helper: true,
       can_select: true,
       can_update: false,
+      can_select_platform_idempotency: true,
+      can_update_platform_idempotency: false,
       can_select_migrations: true,
       can_update_migrations: false,
+      api_can_update_future_table: true,
+      worker_can_update_future_table: true,
     });
     const recoveryIdentity = await assertRuntimeDatabaseRole(recovery, "Integration recovery audit");
     assert.equal(recoveryIdentity.role, "infinite_canvas_recovery_test");
@@ -122,6 +150,7 @@ test("real PostgreSQL enforces migrations, runtime roles, RLS, and LISTEN/NOTIFY
     const migrationCount = await recovery<{ count: number }[]>`select count(*)::int as count from app_schema_migrations`;
     assert.ok((migrationCount[0]?.count ?? 0) > 0);
     await assert.rejects(recovery`update app_schema_migrations set applied_at = applied_at`);
+    await assert.rejects(recovery`select app.refresh_generation_batch(${randomUUID()})`, /permission denied/i);
     const identity = await assertRuntimeDatabaseRole(api, "Integration API");
     assert.equal(identity.role, "infinite_canvas_api_test");
     assert.equal(identity.serviceAuthorized, true);

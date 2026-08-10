@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { attemptIdSchema, decimalUnsignedSchema, jobIdSchema, workspaceIdSchema } from "./ids.js";
 import { cloudFeatureFlagsSchema } from "./session.js";
-import { generationCapabilitySchema, jobStatusSchema } from "./status.js";
+import { generationCapabilitySchema, jobStatusSchema, outboxStatusSchema, reservationStatusSchema } from "./status.js";
 
 const isoDateSchema = z.iso.datetime({ offset: true });
 export const adminPageQuerySchema = z.object({
@@ -119,20 +119,40 @@ export const adminJobSchema = z.object({
   version: z.number().int().nonnegative(),
   attemptId: attemptIdSchema,
   attemptNo: z.number().int().positive(),
+  channelId: z.uuid(),
   providerTaskId: z.string().nullable(),
   errorCode: z.string().nullable(),
   errorMessage: z.string().nullable(),
+  evidence: z.record(z.string(), z.unknown()),
+  businessDeadlineAt: isoDateSchema,
   outcomeUnknownAt: isoDateSchema.nullable(),
   reconcileAfter: isoDateSchema.nullable(),
   releaseAfter: isoDateSchema.nullable(),
+  reservationStatus: reservationStatusSchema.nullable(),
+  reservedCredits: decimalUnsignedSchema.nullable(),
+  outbox: z.array(z.object({
+    status: outboxStatusSchema,
+    dedupeKey: z.string(),
+    lastError: z.string().nullable(),
+    updatedAt: isoDateSchema,
+  })),
+  ledgerKinds: z.array(z.string()),
   createdAt: isoDateSchema,
   updatedAt: isoDateSchema,
 });
 
+export const unknownResolutionEvidenceSchema = z.object({
+  source: z.string().trim().min(1).max(100),
+  reference: z.string().trim().min(1).max(1000),
+}).catchall(z.unknown()).refine(
+  (value) => JSON.stringify(value).length <= 8_192,
+  "Evidence must be at most 8192 serialized characters",
+);
+
 export const unknownResolutionRequestSchema = z.discriminatedUnion("resolution", [
-  z.object({ resolution: z.enum(["not_accepted", "provider_failed"]), reason: z.string().trim().min(3).max(500), evidence: z.record(z.string(), z.unknown()).default({}) }),
-  z.object({ resolution: z.literal("accepted"), providerTaskId: z.string().trim().min(1).max(500), reason: z.string().trim().min(3).max(500), evidence: z.record(z.string(), z.unknown()).default({}) }),
-  z.object({ resolution: z.literal("provider_succeeded"), mediaUrl: httpUrlSchema, reason: z.string().trim().min(3).max(500), evidence: z.record(z.string(), z.unknown()).default({}) }),
+  z.object({ resolution: z.enum(["not_accepted", "provider_failed"]), reason: z.string().trim().min(3).max(500), evidence: unknownResolutionEvidenceSchema }),
+  z.object({ resolution: z.literal("accepted"), providerTaskId: z.string().trim().min(1).max(500), reason: z.string().trim().min(3).max(500), evidence: unknownResolutionEvidenceSchema }),
+  z.object({ resolution: z.literal("provider_succeeded"), mediaUrl: httpUrlSchema, reason: z.string().trim().min(3).max(500), evidence: unknownResolutionEvidenceSchema }),
 ]);
 
 export const unknownResolutionResponseSchema = z.object({ attemptId: attemptIdSchema, status: jobStatusSchema });

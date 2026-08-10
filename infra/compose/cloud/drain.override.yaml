@@ -1,0 +1,53 @@
+services:
+  worker:
+    image: ${WORKER_OLD_IMAGE:?immutable-digest-required}
+    environment:
+      OUTBOX_DISPATCHER_ENABLED: ${WORKER_OLD_DISPATCHER_ENABLED:?required}
+      UNKNOWN_RECONCILER_ENABLED: ${WORKER_OLD_RECONCILER_ENABLED:?required}
+    labels:
+      infinite-canvas.revision-role: old
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8733/health').then(r=>r.json()).then(v=>{if(v.status!=='HEALTHY')process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  worker-new:
+    image: ${WORKER_NEW_IMAGE:?immutable-digest-required}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      BUSINESS_DATABASE_URL: ${BUSINESS_DATABASE_URL_WORKER:?required}
+      SUPABASE_URL: ${SUPABASE_URL:?required}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:?required}
+      HATCHET_MODE: cloud
+      HATCHET_CLIENT_TOKEN: ${HATCHET_CLIENT_TOKEN:?required}
+      HATCHET_NAMESPACE: ${HATCHET_NAMESPACE:-infinite-canvas}
+      HATCHET_WORKER_SLOTS: ${HATCHET_WORKER_SLOTS:-20}
+      HATCHET_DURABLE_SLOTS: ${HATCHET_DURABLE_SLOTS:-100}
+      WORKER_HEALTH_PORT: 8733
+      OUTBOX_DISPATCHER_ENABLED: ${WORKER_NEW_DISPATCHER_ENABLED:?required}
+      UNKNOWN_RECONCILER_ENABLED: ${WORKER_NEW_RECONCILER_ENABLED:?required}
+      CREDENTIAL_MASTER_KEY: ${CREDENTIAL_MASTER_KEY:?required}
+      S3_REGION: ${S3_REGION:?required}
+      S3_ENDPOINT: ${S3_ENDPOINT:?required}
+      S3_BUCKET: ${S3_BUCKET:?required}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?required}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?required}
+      S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-false}
+    labels:
+      infinite-canvas.revision-role: new
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=2g"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    stop_grace_period: 50m
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8733/health').then(r=>r.json()).then(v=>{if(v.status!=='HEALTHY')process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks: [backend]

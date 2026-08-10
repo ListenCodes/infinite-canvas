@@ -39,6 +39,9 @@ test("recovery drill validates conditional S3 writes through the real SDK path",
   assert.match(fixtures, /new HeadObjectCommand/);
   assert.match(drill, /const sourceValidation = await seedRecoveryFixtures/);
   assert.match(drill, /sourceValidation,/);
+  assert.match(drill, /process\.env\.RELEASE_MANIFEST_PATH/);
+  assert.match(drill, /Recovery images do not match the authoritative release manifest/);
+  assert.match(drill, /releaseManifest: releaseManifest \?\? null/);
 });
 
 test("restored job reconciliation requires compatible business and control-plane state", () => {

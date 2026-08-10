@@ -219,6 +219,7 @@ async function main() {
   let cleanupError;
   let primaryError;
   let candidateImages;
+  let releaseManifest;
 
   try {
     workingDirectory = await mkdtemp(join(tmpdir(), "infinite-canvas-recovery-drill-"));
@@ -236,6 +237,24 @@ async function main() {
         imageId: (await run("docker", ["image", "inspect", "--format", "{{.Id}}", baseEnvironment.WORKER_IMAGE], { label: "Inspect Worker recovery image" })).stdout.trim(),
       },
     };
+    if (process.env.RELEASE_MANIFEST_PATH) {
+      const manifestBytes = await readFile(resolve(process.env.RELEASE_MANIFEST_PATH));
+      const manifest = JSON.parse(manifestBytes.toString("utf8"));
+      if (
+        manifest?.source?.commit !== sourceSha ||
+        manifest?.images?.api?.reference !== baseEnvironment.API_IMAGE ||
+        manifest?.images?.worker?.reference !== baseEnvironment.WORKER_IMAGE ||
+        typeof manifest?.images?.web?.reference !== "string"
+      ) throw new Error("Recovery images do not match the authoritative release manifest");
+      releaseManifest = {
+        sha256: sha256(manifestBytes),
+        images: {
+          web: manifest.images.web.reference,
+          api: manifest.images.api.reference,
+          worker: manifest.images.worker.reference,
+        },
+      };
+    }
     await compose(sourceProject, sourceEnvironment, ["config", "--quiet"], "Source recovery Compose validation");
     await compose(targetProject, targetEnvironment, ["config", "--quiet"], "Target recovery Compose validation");
     await Promise.all([
@@ -328,12 +347,13 @@ async function main() {
     const completedAt = new Date();
     const evidence = {
       schemaVersion: 1,
-      procedureVersion: 3,
+      procedureVersion: 4,
       mode: "local_combined_restore_with_synthetic_control_plane_probe",
       candidate: {
         sourceSha,
         sourceDirty,
         images: candidateImages,
+        releaseManifest: releaseManifest ?? null,
       },
       sourceCheckpointAt: checkpointAt.toISOString(),
       restoreStartedAt: restoreStartedAt.toISOString(),

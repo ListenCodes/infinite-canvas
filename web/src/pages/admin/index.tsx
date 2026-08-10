@@ -1,4 +1,4 @@
-import type { AdminAuditLog, AdminJob, AdminUser, ProviderChannel } from "@infinite-canvas/contracts";
+import { unknownResolutionEvidenceSchema, type AdminAuditLog, type AdminJob, type AdminUser, type ProviderChannel } from "@infinite-canvas/contracts";
 import { App, Button, Checkbox, Empty, Form, Input, InputNumber, Modal, Popconfirm, Result, Select, Space, Spin, Table, Tabs, Tag, Typography } from "antd";
 import dayjs from "dayjs";
 import { CircleDollarSign, KeyRound, Plus, RefreshCw, RotateCcw, ShieldOff, ShieldCheck, SlidersHorizontal, Wrench } from "lucide-react";
@@ -78,7 +78,7 @@ export default function AdminPage() {
         if (next.kind === "channel") form.setFieldsValue(next.channel ? { id: next.channel.id, name: next.channel.name, type: next.channel.type, baseUrl: next.channel.baseUrl, capabilities: next.channel.capabilities } : { name: "", type: "openai", baseUrl: "https://", capabilities: ["image"] });
         if (next.kind === "credential") form.setFieldsValue({ secret: "" });
         if (next.kind === "model") form.setFieldsValue({ model: "", capability: next.channel.capabilities[0], adapterType: next.channel.type, adapterVersion: 1, concurrencyLimit: 3, providerIdempotencySupported: false, creditAmount: "1", limits: "{}" });
-        if (next.kind === "resolve") form.setFieldsValue({ resolution: "not_accepted", reason: "", evidence: "{}", providerTaskId: "", mediaUrl: "" });
+        if (next.kind === "resolve") form.setFieldsValue({ resolution: "not_accepted", reason: "", evidence: '{"source":"provider_console","reference":""}', providerTaskId: "", mediaUrl: "" });
     };
 
     const submitModal = async () => {
@@ -100,7 +100,7 @@ export default function AdminPage() {
                 await createAdminModel(modal.channel.id, { ...values, adapterType: modal.channel.type, adapterVersion: Number(values.adapterVersion), concurrencyLimit: Number(values.concurrencyLimit), creditAmount: String(values.creditAmount), limits }, modalRequestKey);
             } else {
                 let evidence: unknown;
-                try { evidence = JSON.parse(values.evidence || "{}"); } catch { throw new Error(t("admin.invalidJson")); }
+                try { evidence = unknownResolutionEvidenceSchema.parse(JSON.parse(values.evidence || "{}")); } catch { throw new Error(t("admin.evidenceRequired")); }
                 const input = values.resolution === "accepted"
                     ? { resolution: values.resolution, providerTaskId: values.providerTaskId, reason: values.reason, evidence }
                     : values.resolution === "provider_succeeded"
@@ -162,13 +162,21 @@ export default function AdminPage() {
         </Space> },
     ]} /></>;
 
-    const jobsTable = <><div className="mb-4"><Select value={jobFilter} onChange={setJobFilter} options={[{ value: "all", label: t("common.all") }, { value: "active", label: t("tasks.active") }, { value: "unknown", label: t("tasks.unknown") }]} /></div><Table<AdminJob> rowKey="jobId" dataSource={visibleJobs} scroll={{ x: 1100 }} pagination={{ pageSize: 20 }} columns={[
+    const jobsTable = <><div className="mb-4"><Select value={jobFilter} onChange={setJobFilter} options={[{ value: "all", label: t("common.all") }, { value: "active", label: t("tasks.active") }, { value: "unknown", label: t("tasks.unknown") }]} /></div><Table<AdminJob> rowKey="jobId" dataSource={visibleJobs} scroll={{ x: 1500 }} pagination={{ pageSize: 20 }} columns={[
         { title: "Job", dataIndex: "jobId", ellipsis: true, width: 190 },
         { title: t("tasks.type"), dataIndex: "capability", width: 90 },
         { title: t("tasks.status"), dataIndex: "status", width: 160, render: (value) => <Tag color={value === "outcome_unknown" ? "warning" : "default"}>{value}</Tag> },
         { title: "Attempt", width: 120, render: (_, job) => `#${job.attemptNo}` },
         { title: t("tasks.error"), ellipsis: true, render: (_, job) => job.errorMessage || job.errorCode || "-" },
-        { title: t("admin.deadline"), width: 180, render: (_, job) => nullableDate(job.releaseAfter) },
+        { title: t("admin.reconciliation"), width: 420, render: (_, job) => <div className="grid gap-1 text-xs">
+            <Typography.Text code copyable>{job.channelId}</Typography.Text>
+            <Typography.Text>{t("admin.providerTask")}: {job.providerTaskId || "-"}</Typography.Text>
+            <Typography.Text type="secondary">{t("admin.unknownSince")}: {nullableDate(job.outcomeUnknownAt)} · {t("admin.nextReconcile")}: {nullableDate(job.reconcileAfter)}</Typography.Text>
+            <Typography.Text type="secondary">{t("admin.deadline")}: {nullableDate(job.releaseAfter)} · {t("admin.businessDeadline")}: {nullableDate(job.businessDeadlineAt)}</Typography.Text>
+            <Typography.Text type="secondary">{t("admin.reservation")}: {job.reservationStatus ?? "-"} / {job.reservedCredits ?? "-"} · {t("admin.ledger")}: {job.ledgerKinds.join(", ") || "-"}</Typography.Text>
+            <Typography.Text type="secondary" ellipsis={{ tooltip: job.outbox.map((item) => `${item.status}:${item.dedupeKey}${item.lastError ? ` (${item.lastError})` : ""}`).join("\n") }}>{t("admin.outbox")}: {job.outbox.map((item) => item.status).join(", ") || "-"}</Typography.Text>
+            <Typography.Text code ellipsis={{ tooltip: JSON.stringify(job.evidence) }}>{JSON.stringify(job.evidence)}</Typography.Text>
+        </div> },
         { title: t("tasks.actions"), fixed: "right", width: 90, render: (_, job) => job.status === "outcome_unknown" ? <Button type="text" icon={<RotateCcw className="size-4" />} onClick={() => openModal({ kind: "resolve", job })} title={t("admin.resolve")} aria-label={t("admin.resolve")} /> : null },
     ]} /></>;
 
@@ -192,7 +200,7 @@ export default function AdminPage() {
             {modal?.kind === "channel" ? <><Form.Item name="name" label={t("admin.channelName")} rules={[{ required: true }]}><Input /></Form.Item><Form.Item name="type" label={t("tasks.type")} rules={[{ required: true }]}><Select options={["grok2api", "sub2api", "openai"].map((value) => ({ value, label: value }))} /></Form.Item><Form.Item name="baseUrl" label="Base URL" rules={[{ required: true, type: "url" }]}><Input /></Form.Item><Form.Item name="capabilities" label={t("admin.capabilities")} rules={[{ required: true }]}><Checkbox.Group options={["image", "video"]} /></Form.Item></> : null}
             {modal?.kind === "credential" ? <Form.Item name="secret" label={t("admin.secret")} rules={[{ required: true, min: 8 }]}><Input.Password autoComplete="new-password" /></Form.Item> : null}
             {modal?.kind === "model" ? <><Form.Item name="model" label={t("admin.model")} rules={[{ required: true }]}><Input /></Form.Item><Form.Item name="capability" label={t("admin.capabilities")} rules={[{ required: true }]}><Select options={modal.channel.capabilities.map((value) => ({ value, label: value }))} /></Form.Item><Form.Item name="creditAmount" label={t("admin.price")} rules={[{ required: true, pattern: /^\d+$/ }]}><Input /></Form.Item><Form.Item name="concurrencyLimit" label={t("admin.concurrency")}><InputNumber min={1} max={100} className="w-full" /></Form.Item><Form.Item name="providerIdempotencySupported" valuePropName="checked"><Checkbox>{t("admin.providerIdempotency")}</Checkbox></Form.Item><Form.Item name="limits" label={t("admin.limitsJson")}><Input.TextArea rows={4} /></Form.Item></> : null}
-            {modal?.kind === "resolve" ? <><Form.Item name="resolution" label={t("admin.resolution")} rules={[{ required: true }]}><Select options={["not_accepted", "provider_failed", "accepted", "provider_succeeded"].map((value) => ({ value, label: value }))} /></Form.Item>{resolution === "accepted" ? <Form.Item name="providerTaskId" label="Provider Task ID" rules={[{ required: true }]}><Input /></Form.Item> : null}{resolution === "provider_succeeded" ? <Form.Item name="mediaUrl" label="Media URL" rules={[{ required: true, type: "url" }]}><Input /></Form.Item> : null}<Form.Item name="evidence" label={t("admin.evidenceJson")}><Input.TextArea rows={4} /></Form.Item></> : null}
+            {modal?.kind === "resolve" ? <><Form.Item name="resolution" label={t("admin.resolution")} rules={[{ required: true }]}><Select options={["not_accepted", "provider_failed", "accepted", "provider_succeeded"].map((value) => ({ value, label: value }))} /></Form.Item>{resolution === "accepted" ? <Form.Item name="providerTaskId" label="Provider Task ID" rules={[{ required: true }]}><Input /></Form.Item> : null}{resolution === "provider_succeeded" ? <Form.Item name="mediaUrl" label="Media URL" rules={[{ required: true, type: "url" }]}><Input /></Form.Item> : null}<Form.Item name="evidence" label={t("admin.evidenceJson")} rules={[{ required: true }, { validator: async (_, value) => { try { unknownResolutionEvidenceSchema.parse(JSON.parse(value || "{}")); } catch { throw new Error(t("admin.evidenceRequired")); } } }]}><Input.TextArea rows={4} /></Form.Item></> : null}
             {modal && modal.kind !== "channel" && modal.kind !== "credential" && modal.kind !== "model" ? <Form.Item name="reason" label={t("admin.reason")} rules={[{ required: true, min: 3 }]}><Input.TextArea rows={3} /></Form.Item> : null}
         </Form>
     </Modal></main>;

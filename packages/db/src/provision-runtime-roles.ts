@@ -21,6 +21,7 @@ const businessTables = [
   "generation_job_targets", "credit_reservations", "generation_job_events", "outbox_events", "imports",
   "platform_risk_entries", "audit_logs", "import_source_mappings",
 ] as const;
+const businessTableNames = new Set<string>(businessTables);
 
 type ProvisionSql = postgres.Sql | postgres.TransactionSql;
 
@@ -67,12 +68,36 @@ export async function provisionRuntimeRoles(rawEnvironment: NodeJS.ProcessEnv): 
     if (!objectOwners[0]?.exists) {
       throw new Error("BUSINESS_DATABASE_OBJECT_OWNER_ROLE does not exist");
     }
+    const tableOwners = await transaction<{ name: string; owner: string }[]>`
+      select relation.relname as name, owner.rolname as owner
+      from pg_class relation
+      join pg_namespace namespace on namespace.oid = relation.relnamespace
+      join pg_roles owner on owner.oid = relation.relowner
+      where namespace.nspname = 'public' and relation.relkind in ('r', 'p')
+    `;
+    const appRoutineOwners = await transaction<{ name: string; owner: string }[]>`
+      select routine.oid::regprocedure::text as name, owner.rolname as owner
+      from pg_proc routine
+      join pg_namespace namespace on namespace.oid = routine.pronamespace
+      join pg_roles owner on owner.oid = routine.proowner
+      where namespace.nspname = 'app'
+    `;
+    const ownedObjects = [
+      ...tableOwners.filter(({ name }) => businessTableNames.has(name)).map((row) => ({ ...row, kind: "table" })),
+      ...appRoutineOwners.map((row) => ({ ...row, kind: "routine" })),
+    ];
+    const misownedObjects = ownedObjects.filter(({ owner }) => owner !== environment.BUSINESS_DATABASE_OBJECT_OWNER_ROLE);
+    if (misownedObjects.length > 0) {
+      const details = misownedObjects.map(({ kind, name, owner }) => `${kind} ${name} is owned by ${owner}`).join(", ");
+      throw new Error(`BUSINESS_DATABASE_OBJECT_OWNER_ROLE does not own the current database objects: ${details}`);
+    }
     await executeFormatted(transaction, transaction<{ command: string }[]>`
       select format(
         'alter default privileges for role %I revoke execute on functions from public',
         ${environment.BUSINESS_DATABASE_OBJECT_OWNER_ROLE}
       ) as command
     `);
+    await transaction.unsafe("revoke execute on all functions in schema app from public");
     await ensureLoginRole(transaction, environment.BUSINESS_DATABASE_API_ROLE, environment.BUSINESS_DATABASE_API_PASSWORD);
     await ensureLoginRole(transaction, environment.BUSINESS_DATABASE_WORKER_ROLE, environment.BUSINESS_DATABASE_WORKER_PASSWORD);
     await ensureLoginRole(
@@ -81,32 +106,56 @@ export async function provisionRuntimeRoles(rawEnvironment: NodeJS.ProcessEnv): 
       environment.BUSINESS_DATABASE_RECOVERY_AUDIT_PASSWORD,
     );
 
-    const tableList = businessTables.map((table) => `\"${table}\"`).join(", ");
+    const tableList = tableOwners
+      .map(({ name }) => name)
+      .filter((name) => businessTableNames.has(name))
+      .map((table) => `\"${table}\"`)
+      .join(", ");
     for (const role of [environment.BUSINESS_DATABASE_API_ROLE, environment.BUSINESS_DATABASE_WORKER_ROLE]) {
       await executeFormatted(transaction, transaction<{ command: string }[]>`
         select format('grant infinite_canvas_service to %I', ${role}) as command
         union all select format('grant connect on database %I to %I', current_database(), ${role})
         union all select format('grant usage on schema public, app to %I', ${role})
-        union all select format(${`grant select, insert, update, delete on table ${tableList} to %I`}, ${role})
         union all select format('grant usage, select on all sequences in schema public to %I', ${role})
         union all select format('grant execute on all functions in schema app to %I', ${role})
         union all select format(
           'alter default privileges for role %I in schema app grant execute on functions to %I',
           ${environment.BUSINESS_DATABASE_OBJECT_OWNER_ROLE}, ${role}
         )
+        union all select format(
+          'alter default privileges for role %I in schema public grant select, insert, update, delete on tables to %I',
+          ${environment.BUSINESS_DATABASE_OBJECT_OWNER_ROLE}, ${role}
+        )
+        union all select format(
+          'alter default privileges for role %I in schema public grant usage, select on sequences to %I',
+          ${environment.BUSINESS_DATABASE_OBJECT_OWNER_ROLE}, ${role}
+        )
       `);
+      if (tableList) {
+        await executeFormatted(transaction, transaction<{ command: string }[]>`
+          select format(${`grant select, insert, update, delete on table ${tableList} to %I`}, ${role}) as command
+        `);
+      }
     }
     await executeFormatted(transaction, transaction<{ command: string }[]>`
       select format('grant infinite_canvas_service to %I', ${environment.BUSINESS_DATABASE_RECOVERY_AUDIT_ROLE}) as command
       union all select format('grant connect on database %I to %I', current_database(), ${environment.BUSINESS_DATABASE_RECOVERY_AUDIT_ROLE})
       union all select format('grant usage on schema public, app to %I', ${environment.BUSINESS_DATABASE_RECOVERY_AUDIT_ROLE})
-      union all select format(${`grant select on table ${tableList} to %I`}, ${environment.BUSINESS_DATABASE_RECOVERY_AUDIT_ROLE})
       union all select format('grant select on table app_schema_migrations to %I', ${environment.BUSINESS_DATABASE_RECOVERY_AUDIT_ROLE})
+      union all select format(
+        'grant execute on function app.current_user_id(), app.is_service_role(), app.is_platform_admin(), app.has_workspace_access(uuid, workspace_role[]) to %I',
+        ${environment.BUSINESS_DATABASE_RECOVERY_AUDIT_ROLE}
+      )
       union all select format(
         'alter default privileges for role %I in schema public grant select on tables to %I',
         ${environment.BUSINESS_DATABASE_OBJECT_OWNER_ROLE}, ${environment.BUSINESS_DATABASE_RECOVERY_AUDIT_ROLE}
       )
     `);
+    if (tableList) {
+      await executeFormatted(transaction, transaction<{ command: string }[]>`
+        select format(${`grant select on table ${tableList} to %I`}, ${environment.BUSINESS_DATABASE_RECOVERY_AUDIT_ROLE}) as command
+      `);
+    }
     });
   } finally {
     await sql.end();

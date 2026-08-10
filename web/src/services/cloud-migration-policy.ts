@@ -3,6 +3,8 @@ export interface CloudMigrationIdentity {
     workspaceId: string;
 }
 
+export type CloudMigrationBusyCounts = Readonly<Record<string, number>>;
+
 export interface LocalProjectRevision {
     id: string;
     updatedAt: string;
@@ -14,6 +16,29 @@ export interface CloudImportPublishedDetail extends CloudMigrationIdentity {
 
 export function cloudMigrationRecordKey(identity: CloudMigrationIdentity): string {
     return `current-v2:${encodeURIComponent(identity.userId)}:${encodeURIComponent(identity.workspaceId)}`;
+}
+
+export function updateCloudMigrationBusyCounts(
+    counts: CloudMigrationBusyCounts,
+    identity: CloudMigrationIdentity,
+    delta: 1 | -1,
+): CloudMigrationBusyCounts {
+    const key = cloudMigrationRecordKey(identity);
+    const nextCount = Math.max(0, (counts[key] ?? 0) + delta);
+    if (nextCount === 0) {
+        if (!(key in counts)) return counts;
+        const next = { ...counts };
+        delete next[key];
+        return next;
+    }
+    return { ...counts, [key]: nextCount };
+}
+
+export function isCloudMigrationBusy(
+    counts: CloudMigrationBusyCounts,
+    identity: CloudMigrationIdentity | null,
+): boolean {
+    return identity ? (counts[cloudMigrationRecordKey(identity)] ?? 0) > 0 : false;
 }
 
 export function cloudMigrationBelongsTo(

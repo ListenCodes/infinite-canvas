@@ -24,7 +24,9 @@ const checkedFiles = [
   "apps/worker/Dockerfile",
   "infra/compose/local/compose.yaml",
   "infra/compose/cloud/compose.yaml",
+  "infra/compose/cloud/drain.override.yaml",
   "infra/compose/oss/compose.yaml",
+  "infra/compose/oss/drain.override.yaml",
   "infra/compose/recovery/compose.yaml",
   "infra/monitoring/compose.yaml",
   "infra/release/images.lock",
@@ -67,6 +69,17 @@ if (!finalWebUser || finalWebUser === "root" || finalWebUser === "0") {
   errors.push("Dockerfile: final Web stage must declare a non-root USER");
 }
 
+for (const [relativePath, endpoint] of [
+  ["apps/api/Dockerfile", "http://127.0.0.1:3001/readyz"],
+  ["apps/worker/Dockerfile", "http://127.0.0.1:8733/health"],
+]) {
+  const dockerfile = await readFile(resolve(repository, relativePath), "utf8");
+  const finalStage = dockerfile.split(/^FROM\s+/im).at(-1) ?? "";
+  if (!/^HEALTHCHECK\s+/im.test(finalStage) || !finalStage.includes(endpoint)) {
+    errors.push(`${relativePath}: final stage must retain the production health probe ${endpoint}`);
+  }
+}
+
 const ossCompose = await readFile(resolve(repository, "infra/compose/oss/compose.yaml"), "utf8");
 for (const required of [
   "http://127.0.0.1:8733/ready",
@@ -81,6 +94,32 @@ for (const required of [
 function composeService(content, service) {
   const match = new RegExp(`^  ${service}:\\r?\\n([\\s\\S]*?)(?=^  [a-z0-9-]+:|^volumes:|^networks:|(?![\\s\\S]))`, "m").exec(content);
   return match?.[1] ?? "";
+}
+
+for (const topology of ["cloud", "oss"]) {
+  const basePath = `infra/compose/${topology}/compose.yaml`;
+  const overridePath = `infra/compose/${topology}/drain.override.yaml`;
+  const base = await readFile(resolve(repository, basePath), "utf8");
+  const override = await readFile(resolve(repository, overridePath), "utf8");
+  const oldBase = composeService(base, "worker");
+  const oldOverride = composeService(override, "worker");
+  const candidate = composeService(override, "worker-new");
+  for (const [role, service] of [["old", oldOverride], ["new", candidate]]) {
+    for (const required of [
+      `WORKER_${role.toUpperCase()}_IMAGE`,
+      `WORKER_${role.toUpperCase()}_DISPATCHER_ENABLED`,
+      `WORKER_${role.toUpperCase()}_RECONCILER_ENABLED`,
+      `infinite-canvas.revision-role: ${role}`,
+      "http://127.0.0.1:8733/health",
+    ]) {
+      if (!service.includes(required)) errors.push(`${overridePath}: ${role} Worker is missing ${required}`);
+    }
+  }
+  for (const required of ["read_only: true", 'cap_drop: ["ALL"]', 'security_opt: ["no-new-privileges:true"]', "stop_grace_period: 50m"]) {
+    if (!oldBase.includes(required)) errors.push(`${basePath}: old Worker is missing ${required}`);
+    if (!candidate.includes(required)) errors.push(`${overridePath}: new Worker is missing ${required}`);
+  }
+  if (/^\s+ports:/m.test(candidate)) errors.push(`${overridePath}: worker-new must not expose host ports`);
 }
 
 const workflowsDirectory = resolve(repository, ".github/workflows");
@@ -160,6 +199,23 @@ function validateApplicationImages(environment, source, allowPlaceholder) {
   }
 }
 
+function validateDrainEnvironment(environment, source, allowPlaceholder) {
+  for (const key of ["WORKER_OLD_IMAGE", "WORKER_NEW_IMAGE"]) {
+    const value = environment[key];
+    if (!value) errors.push(`${source}: ${key} is required`);
+    else if (!(allowPlaceholder && /@sha256:replace-me$/.test(value))) assertImmutableImage(value, `${source}: ${key}`);
+  }
+  for (const subsystem of ["DISPATCHER", "RECONCILER"]) {
+    const oldValue = environment[`WORKER_OLD_${subsystem}_ENABLED`];
+    const newValue = environment[`WORKER_NEW_${subsystem}_ENABLED`];
+    if (![oldValue, newValue].every((value) => value === "true" || value === "false")) {
+      errors.push(`${source}: ${subsystem.toLowerCase()} owner flags must be explicit booleans`);
+    } else if (Number(oldValue === "true") + Number(newValue === "true") !== 1) {
+      errors.push(`${source}: exactly one ${subsystem.toLowerCase()} owner must be enabled`);
+    }
+  }
+}
+
 const examples = [];
 async function findExamples(directory) {
   for (const entry of await readdir(directory, { withFileTypes: true })) {
@@ -174,7 +230,9 @@ for (const path of examples) {
   if (/-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|\bsb_secret_[A-Za-z0-9._-]{16,}/.test(content)) {
     errors.push(`${path}: env example contains a secret-like value`);
   }
-  if (/\b(?:WEB|API|WORKER)_IMAGE=/.test(content)) validateApplicationImages(parseEnvironment(content), path, true);
+  const environment = parseEnvironment(content);
+  if (/\bWORKER_(?:OLD|NEW)_IMAGE=/.test(content)) validateDrainEnvironment(environment, path, true);
+  else if (/\b(?:WEB|API|WORKER)_IMAGE=/.test(content)) validateApplicationImages(environment, path, true);
 }
 
 const processImages = Object.fromEntries(["WEB_IMAGE", "API_IMAGE", "WORKER_IMAGE"].flatMap((key) => process.env[key] ? [[key, process.env[key]]] : []));
@@ -183,8 +241,12 @@ const validatedEnvironments = [];
 for (const relativePath of envFileArguments) {
   const path = resolve(relativePath);
   const environment = parseEnvironment(await readFile(path, "utf8"));
-  validateApplicationImages(environment, path, false);
-  validatedEnvironments.push(environment);
+  if ("WORKER_OLD_IMAGE" in environment || "WORKER_NEW_IMAGE" in environment) {
+    validateDrainEnvironment(environment, path, false);
+  } else {
+    validateApplicationImages(environment, path, false);
+    validatedEnvironments.push(environment);
+  }
 }
 
 for (const relativePath of releaseManifestArguments) {

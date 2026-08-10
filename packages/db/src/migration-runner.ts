@@ -13,6 +13,59 @@ export interface MigrationFile {
   path: string;
 }
 
+export interface MigrationLedgerIdentity {
+  name: string;
+  checksum: string;
+  position: number;
+  prefixHash: string;
+}
+
+export interface AppliedMigrationRow {
+  name: string;
+  sha256: string;
+  manifest_position: number | null;
+  prefix_hash: string | null;
+}
+
+export function bindMigrationOrder(
+  migrations: readonly { name: string; checksum: string }[],
+): MigrationLedgerIdentity[] {
+  let prefixHash = createHash("sha256").update("infinite-canvas-migrations-v1").digest("hex");
+  return migrations.map((migration, position) => {
+    prefixHash = createHash("sha256")
+      .update(`${prefixHash}\n${position}\n${migration.name}\n${migration.checksum}`)
+      .digest("hex");
+    return { ...migration, position, prefixHash };
+  });
+}
+
+export function validateMigrationLedger(
+  prepared: readonly MigrationLedgerIdentity[],
+  existingRows: readonly AppliedMigrationRow[],
+): void {
+  const existing = new Map(existingRows.map((row) => [row.name, row]));
+  const knownNames = new Set(prepared.map((migration) => migration.name));
+  const unknownApplied = existingRows.map((row) => row.name).filter((name) => !knownNames.has(name));
+  if (unknownApplied.length > 0)
+    throw new Error(`Database contains unknown migrations: ${unknownApplied.join(", ")}`);
+  let encounteredPending = false;
+  for (const migration of prepared) {
+    const applied = existing.get(migration.name);
+    if (applied && applied.sha256 !== migration.checksum)
+      throw new Error(`Applied migration changed: ${migration.name}`);
+    if (!applied) {
+      encounteredPending = true;
+      continue;
+    }
+    if (encounteredPending)
+      throw new Error(`Applied migrations are not a prefix of order.txt: ${migration.name}`);
+    if (applied.manifest_position !== null && applied.manifest_position !== migration.position)
+      throw new Error(`Applied migration order changed: ${migration.name}`);
+    if (applied.prefix_hash !== null && applied.prefix_hash !== migration.prefixHash)
+      throw new Error(`Applied migration prefix changed: ${migration.name}`);
+  }
+}
+
 export async function collectMigrationFiles(directory = migrationsDir): Promise<MigrationFile[]> {
   const files: MigrationFile[] = [];
 
@@ -61,7 +114,15 @@ export async function migrateDatabase(
   try {
     await client`select pg_advisory_lock(hashtext('infinite_canvas_schema_migrations'))`;
     migrationLockHeld = true;
-    await client.unsafe(`create table if not exists app_schema_migrations (name text primary key, sha256 text not null, applied_at timestamptz not null default now())`);
+    await client.unsafe(`create table if not exists app_schema_migrations (
+      name text primary key,
+      sha256 text not null,
+      manifest_position integer not null,
+      prefix_hash text not null,
+      applied_at timestamptz not null default now()
+    )`);
+    await client.unsafe(`alter table app_schema_migrations add column if not exists manifest_position integer`);
+    await client.unsafe(`alter table app_schema_migrations add column if not exists prefix_hash text`);
     const migrations = await collectMigrationFiles();
     const targetIndex = options.through
       ? migrations.findIndex(({ name }) => name === options.through)
@@ -69,7 +130,7 @@ export async function migrateDatabase(
     if (targetIndex < 0) {
       throw new Error(`Unknown migration target: ${options.through}`);
     }
-    const prepared = await Promise.all(
+    const migrationBodies = await Promise.all(
       migrations.map(async (migration) => {
         const body = await readFile(migration.path, "utf8");
         return {
@@ -79,36 +140,36 @@ export async function migrateDatabase(
         };
       }),
     );
-    const existingRows = await client<{ name: string; sha256: string }[]>`
-      select name, sha256 from app_schema_migrations
+    const identities = bindMigrationOrder(migrationBodies);
+    const prepared = migrationBodies.map((migration, index) => ({ ...migration, ...identities[index]! }));
+    const existingRows = await client<AppliedMigrationRow[]>`
+      select name, sha256, manifest_position, prefix_hash from app_schema_migrations
     `;
-    const existing = new Map(existingRows.map((row) => [row.name, row.sha256]));
-    const knownNames = new Set(prepared.map((migration) => migration.name));
-    const unknownApplied = existingRows
-      .map((row) => row.name)
-      .filter((name) => !knownNames.has(name));
-    if (unknownApplied.length > 0)
-      throw new Error(
-        `Database contains unknown migrations: ${unknownApplied.join(", ")}`,
-      );
-    let encounteredPending = false;
-    for (const migration of prepared) {
-      const appliedChecksum = existing.get(migration.name);
-      if (appliedChecksum && appliedChecksum !== migration.checksum)
-        throw new Error(`Applied migration changed: ${migration.name}`);
-      if (!appliedChecksum) encounteredPending = true;
-      else if (encounteredPending)
-        throw new Error(
-          `Applied migrations are not a prefix of order.txt: ${migration.name}`,
-        );
-    }
+    validateMigrationLedger(prepared, existingRows);
+    const existing = new Set(existingRows.map((row) => row.name));
+    await client.begin(async (transaction) => {
+      for (const migration of prepared) {
+        if (!existing.has(migration.name)) break;
+        await transaction`
+          update app_schema_migrations
+          set manifest_position = ${migration.position}, prefix_hash = ${migration.prefixHash}
+          where name = ${migration.name} and (manifest_position is null or prefix_hash is null)
+        `;
+      }
+      await transaction.unsafe(`alter table app_schema_migrations alter column manifest_position set not null`);
+      await transaction.unsafe(`alter table app_schema_migrations alter column prefix_hash set not null`);
+      await transaction.unsafe(`create unique index if not exists app_schema_migrations_position_key on app_schema_migrations (manifest_position)`);
+    });
     const applied: string[] = [];
-    for (const [index, { name, body, checksum }] of prepared.entries()) {
+    for (const [index, { name, body, checksum, position, prefixHash }] of prepared.entries()) {
       if (index > targetIndex) break;
       if (existing.has(name)) continue;
       await client.begin(async (transaction) => {
         await transaction.unsafe(body);
-        await transaction`insert into app_schema_migrations (name, sha256) values (${name}, ${checksum})`;
+        await transaction`
+          insert into app_schema_migrations (name, sha256, manifest_position, prefix_hash)
+          values (${name}, ${checksum}, ${position}, ${prefixHash})
+        `;
       });
       applied.push(name);
     }

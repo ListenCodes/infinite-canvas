@@ -97,12 +97,19 @@ function adminJobProjection(row: any) {
     version: row.version,
     attemptId: row.attempt_id,
     attemptNo: row.attempt_no,
+    channelId: row.channel_id,
     providerTaskId: row.provider_task_id,
     errorCode: row.error_code,
     errorMessage: row.error_message,
+    evidence: row.evidence_json,
+    businessDeadlineAt: row.business_deadline_at?.toISOString?.() ?? row.business_deadline_at,
     outcomeUnknownAt: row.outcome_unknown_at?.toISOString?.() ?? row.outcome_unknown_at ?? null,
     reconcileAfter: row.reconcile_after?.toISOString?.() ?? row.reconcile_after ?? null,
     releaseAfter: row.release_after?.toISOString?.() ?? row.release_after ?? null,
+    reservationStatus: row.reservation_status,
+    reservedCredits: row.reserved_credits,
+    outbox: row.outbox_events,
+    ledgerKinds: row.ledger_kinds,
     createdAt: row.created_at?.toISOString?.() ?? row.created_at,
     updatedAt: row.updated_at?.toISOString?.() ?? row.updated_at,
   });
@@ -407,7 +414,7 @@ export class AdminService {
       }
       const request = requests[0];
       if (!request || request.request_hash !== requestHash) throw new AppError(409, "idempotency_key_conflict", "Idempotency-Key was already used with a different adjustment");
-      if (request.status === "completed") return request.response_body;
+      if (request.status === "completed") return adminWalletAdjustmentResponseSchema.parse(request.response_body);
       const wallets = await transaction<{ available: string; reserved: string }[]>`
         update wallet_accounts
         set available = available + ${input.amount}::bigint, version = version + 1, updated_at = now()
@@ -679,7 +686,7 @@ export class AdminService {
       }
       const request = requests[0];
       if (!request || request.request_hash !== hash) throw new AppError(409, "idempotency_key_conflict", "Idempotency-Key was used for another resolution");
-      if (request.status === "completed") return request.response_body;
+      if (request.status === "completed") return unknownResolutionResponseSchema.parse(request.response_body);
       if (current.status !== "outcome_unknown") throw new AppError(409, "generation_attempt_not_unknown", "Only an outcome_unknown attempt can be resolved");
 
       let status: "failed" | "waiting_provider" | "materializing";
@@ -698,6 +705,10 @@ export class AdminService {
           update generation_attempts set status = ${attemptStatus}::attempt_status,
             provider_task_id = ${input.resolution === "accepted" ? input.providerTaskId : null},
             evidence_json = ${JSON.stringify({ ...input.evidence, ...(mediaUrl ? { mediaUrls: [mediaUrl] } : {}) })}::jsonb,
+            business_deadline_at = case
+              when ${input.resolution === "accepted"} then greatest(business_deadline_at, now() + interval '30 minutes')
+              else business_deadline_at
+            end,
             executor_dispatch_token = ${dispatchToken}::uuid,
             executor_claim_id = null, executor_run_id = null, error_code = null, error_message = null,
             reconcile_after = null, release_after = null, updated_at = now()
@@ -761,11 +772,31 @@ export class AdminService {
       await setServiceContext(transaction);
       return transaction`
         select job.id, job.workspace_id, job.batch_id, job.capability, job.status, job.version,
-               attempt.id as attempt_id, attempt.attempt_no, attempt.provider_task_id,
-               attempt.error_code, attempt.error_message, attempt.outcome_unknown_at,
-               attempt.reconcile_after, attempt.release_after, job.created_at, job.updated_at
+               attempt.id as attempt_id, attempt.attempt_no, attempt.channel_id, attempt.provider_task_id,
+               attempt.error_code, attempt.error_message, attempt.evidence_json, attempt.business_deadline_at,
+               attempt.outcome_unknown_at, attempt.reconcile_after, attempt.release_after,
+               reservation.status as reservation_status, reservation.amount::text as reserved_credits,
+               coalesce((
+                 select jsonb_agg(jsonb_build_object(
+                   'status', event.status,
+                   'dedupeKey', event.dedupe_key,
+                   'lastError', event.last_error,
+                   'updatedAt', event.updated_at
+                 ) order by event.created_at desc)
+                 from outbox_events event
+                 where event.workspace_id = job.workspace_id and event.aggregate_id = job.id
+                   and event.payload->>'attemptId' = attempt.id::text
+               ), '[]'::jsonb) as outbox_events,
+               coalesce((
+                 select jsonb_agg(entry.kind order by entry.created_at)
+                 from wallet_entries entry
+                 where entry.workspace_id = job.workspace_id and entry.reference_type = 'attempt'
+                   and entry.reference_id = attempt.id
+               ), '[]'::jsonb) as ledger_kinds,
+               job.created_at, job.updated_at
         from generation_jobs job
         join generation_attempts attempt on attempt.id = job.current_attempt_id
+        left join credit_reservations reservation on reservation.attempt_id = attempt.id
         where (${cursor?.createdAt ?? null}::timestamptz is null or
                (job.created_at, job.id) < (${cursor?.createdAt ?? null}::timestamptz, ${cursor?.id ?? null}::uuid))
         order by job.created_at desc, job.id desc limit ${query.limit + 1}
