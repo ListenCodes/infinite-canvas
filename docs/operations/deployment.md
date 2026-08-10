@@ -6,12 +6,12 @@ a separate rollback target until the cloud cutover is accepted.
 
 ## Supported topologies
 
-| Topology | Compose file | Hatchet | Business data |
-|---|---|---|---|
-| Local | `infra/compose/local/compose.yaml` | Hatchet Lite | Local Supabase CLI or explicitly configured development Supabase |
-| Managed | `infra/compose/cloud/compose.yaml` | Hatchet Cloud | Managed Supabase PostgreSQL/Auth/Storage or compatible S3 |
-| Self-hosted | `infra/compose/oss/compose.yaml` | Hatchet OSS v0.101.12 | Managed or separately operated PostgreSQL and S3-compatible storage |
-| Recovery drill | `infra/compose/recovery/compose.yaml` | Hatchet Lite v0.101.12 source/target | Isolated PostgreSQL 17 and versioned Moto S3 source/target |
+| Topology       | Compose file                          | Hatchet                              | Business data                                                       |
+| -------------- | ------------------------------------- | ------------------------------------ | ------------------------------------------------------------------- |
+| Local          | `infra/compose/local/compose.yaml`    | Hatchet Lite                         | Local Supabase CLI or explicitly configured development Supabase    |
+| Managed        | `infra/compose/cloud/compose.yaml`    | Hatchet Cloud                        | Managed Supabase PostgreSQL/Auth/Storage or compatible S3           |
+| Self-hosted    | `infra/compose/oss/compose.yaml`      | Hatchet OSS v0.101.12                | Managed or separately operated PostgreSQL and S3-compatible storage |
+| Recovery drill | `infra/compose/recovery/compose.yaml` | Hatchet Lite v0.101.12 source/target | Isolated PostgreSQL 17 and versioned Moto S3 source/target          |
 
 Application and Hatchet databases must be separate databases and runtime roles.
 `BUSINESS_DATABASE_LISTENER_URL` must use a direct or session connection because
@@ -89,6 +89,9 @@ promotion rerun downloads and reuses that persisted set even if a rebuild would
 produce different bytes. Operators and deployment automation must treat only a
 published Release with both manifest files as ready; candidate tags and a draft
 Release are not a deployment signal.
+Manual `workflow_dispatch` runs build and validate candidate manifests but publish
+neither `sha-<commit>` nor release tags. Only a tag-push run may create immutable
+deployment tags after its draft Release has persisted the complete three-image set.
 The combined-restore drill is then rerun against the exact API and Worker digest
 references from that manifest. Its redacted evidence records the manifest SHA-256
 and all three image references, plus one real terminal Hatchet run observed before
@@ -103,6 +106,15 @@ For OSS, Compose waits for `hatchet-engine:/ready` and
 the REST API in v0.101.12; `HATCHET_CLIENT_API_URL=http://hatchet-dashboard` is
 intentional. Do not expose engine gRPC, Hatchet PostgreSQL, or internal metrics
 directly to the Internet.
+
+The release gate also renders `infra/compose/oss/smoke.override.yaml`, starts the
+pinned split engine/dashboard stack from an empty volume, mints a one-hour token,
+and runs the repository terminal probe from the non-root Worker image. The probe
+shares only an internal Hatchet network and receives no business database, object
+storage, Supabase service, or provider credentials. Its redacted terminal-run
+observation and Compose logs are retained as `oss-hatchet-smoke-<commit>`; this CI
+evidence validates startup and SDK connectivity but does not replace the selected
+production OSS backup/restore exercise.
 
 ## Health and security checks
 

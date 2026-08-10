@@ -1,0 +1,42 @@
+services:
+  hatchet-engine:
+    networks: [hatchet-control, app-backend, hatchet-smoke]
+
+  hatchet-dashboard:
+    networks: [hatchet-control, app-backend, hatchet-smoke]
+
+  hatchet-terminal-smoke:
+    profiles: ["smoke"]
+    image: ${WORKER_IMAGE:?worker-image-required}
+    command: ["node", "/run/hatchet-terminal-probe.mjs"]
+    environment:
+      HATCHET_CLIENT_TOKEN_FILE: /run/secrets/hatchet-smoke-token
+      HATCHET_CLIENT_HOST_PORT: hatchet-engine:7070
+      HATCHET_CLIENT_API_URL: http://hatchet-dashboard
+    depends_on:
+      hatchet-engine: { condition: service_healthy }
+      hatchet-dashboard: { condition: service_healthy }
+    volumes:
+      - type: bind
+        source: ${HATCHET_SMOKE_PROBE_PATH:?required}
+        target: /run/hatchet-terminal-probe.mjs
+        read_only: true
+      - type: bind
+        source: ${HATCHET_SMOKE_EVIDENCE_PATH:?required}
+        target: /run/hatchet-terminal-evidence.mjs
+        read_only: true
+    secrets:
+      - source: hatchet-smoke-token
+        target: hatchet-smoke-token
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=128m"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    networks: [hatchet-smoke]
+
+networks:
+  hatchet-smoke: { internal: true }
+
+secrets:
+  hatchet-smoke-token:
+    file: ${HATCHET_SMOKE_TOKEN_FILE:?required}

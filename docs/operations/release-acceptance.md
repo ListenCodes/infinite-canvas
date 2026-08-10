@@ -1,31 +1,31 @@
 # Release Acceptance and Evidence
 
 Every tagged release runs unit/type/build/audit, browser secret scans, real PostgreSQL
-integration tests, three image builds, Compose parsing, non-root checks, and final
-multi-architecture manifest verification. A production release additionally needs
+integration tests, three image builds, Compose parsing, a split Hatchet OSS terminal
+smoke, non-root checks, and final multi-architecture manifest verification. A production release additionally needs
 the Staging evidence below. Record evidence in the project knowledge base; do not put
 secrets, signed URLs, or user content in it.
 
 For each row record candidate source SHA, three image digests, environment, UTC time,
 operator/reviewer, procedure or test name, evidence URI, result, and limitations.
 
-| # | Blocking scenario | Minimum evidence |
-|---|---|---|
-| 1 | Tenant isolation | Two real users; project/asset/job/event/wallet read/write/sign/SSE rejection matrix |
-| 2 | Forged authority | HTTP request and stored DB values for workspace/owner/role/price/channel forgery |
-| 3 | Ten identical keys | One batch, three jobs/reservations, at most three provider creates |
-| 4 | Three images, two fail | Per-slot UI/errors; success preserved; exactly two new retry attempts |
-| 5 | Browser close/relogin | Authenticated snapshot reaches terminal state without a new submit |
-| 6 | Four video refresh windows | Before/after task ID, polling, download; resume or explicit unknown |
-| 7 | Moderation 400 | Stable non-network error and one provider call |
-| 8 | Lost paid response | One create, unknown state, frozen reservation, reconciliation entry |
-| 9 | Unknown deadlines | 1-hour check; <=24-hour settle/release; risk entry; no clawback |
-| 10 | Three Worker crash points | Provider success, object write, pre-settle; one object/asset/settlement |
-| 11 | Two API SSE replicas | Both receive; dropped NOTIFY recovered by cursor scan; no resubmit |
-| 12 | Last-Event-ID recovery | Ordered replay; snapshot fallback when cursor expired; no resubmit |
-| 13 | Hatchet Cloud 30-minute outage | One Outbox record; recovery CAS; no duplicate provider/ledger effect |
-| 14 | Secret boundary | Deployed bundle/storage/responses/logs scanned with canaries and patterns |
-| 15 | Combined restore | Business DB, objects, Hatchet state restored and every current job reconciled |
+| #   | Blocking scenario              | Minimum evidence                                                                    |
+| --- | ------------------------------ | ----------------------------------------------------------------------------------- |
+| 1   | Tenant isolation               | Two real users; project/asset/job/event/wallet read/write/sign/SSE rejection matrix |
+| 2   | Forged authority               | HTTP request and stored DB values for workspace/owner/role/price/channel forgery    |
+| 3   | Ten identical keys             | One batch, three jobs/reservations, at most three provider creates                  |
+| 4   | Three images, two fail         | Per-slot UI/errors; success preserved; exactly two new retry attempts               |
+| 5   | Browser close/relogin          | Authenticated snapshot reaches terminal state without a new submit                  |
+| 6   | Four video refresh windows     | Before/after task ID, polling, download; resume or explicit unknown                 |
+| 7   | Moderation 400                 | Stable non-network error and one provider call                                      |
+| 8   | Lost paid response             | One create, unknown state, frozen reservation, reconciliation entry                 |
+| 9   | Unknown deadlines              | 1-hour check; <=24-hour settle/release; risk entry; no clawback                     |
+| 10  | Three Worker crash points      | Provider success, object write, pre-settle; one object/asset/settlement             |
+| 11  | Two API SSE replicas           | Both receive; dropped NOTIFY recovered by cursor scan; no resubmit                  |
+| 12  | Last-Event-ID recovery         | Ordered replay; snapshot fallback when cursor expired; no resubmit                  |
+| 13  | Hatchet Cloud 30-minute outage | One Outbox record; recovery CAS; no duplicate provider/ledger effect                |
+| 14  | Secret boundary                | Deployed bundle/storage/responses/logs scanned with canaries and patterns           |
+| 15  | Combined restore               | Business DB, objects, Hatchet state restored and every current job reconciled       |
 
 Row 15 has three explicit evidence tiers. The release-gate CI tier runs
 `npm run recovery:drill` with a real terminal Hatchet Lite run and proves the
@@ -51,15 +51,16 @@ The commit containing this section has the following local evidence on 2026-08-1
   The API, Worker, and database suites each expose one real-PostgreSQL integration
   entry; those three entries are skipped by the normal unit command when
   `TEST_POSTGRES_ADMIN_URL` is absent.
-- The Web suites pass 44 tests across legacy media adapters, canvas terminal-state
+- The Web suites pass 52 tests across legacy media adapters, canvas terminal-state
   handling, cloud recovery/SSE, and local-to-cloud migration safety. The migration
   tests cover account/workspace isolation, two-phase activation, fail-closed media
   export, ordered retry-key persistence, and rollback of standalone media and text
   assets without deleting the original local archive.
 - Root and Web type checks and production builds pass. Root and Web production
   dependency audits report zero known vulnerabilities. Deployment/recovery policy
-  tests pass 29 scenarios, and the deployment, recovery-boundary, Web bundle secret,
-  isolated-browser storage secret, and diff checks pass.
+  tests pass 32 scenarios, and the deployment, recovery-boundary, Web bundle secret,
+  isolated-browser storage secret, and diff checks pass. The OSS terminal smoke is
+  wired into the Linux release gate but has not run on this Docker-less workstation.
 - Capacity tests cover v1/v2 contract separation, immutable attempt snapshots,
   old-prefix migration backfill, append-only channel policy, workspace 3/2 and
   dynamic channel leases, provider-request-only RPM consumption, retained unknown
@@ -111,6 +112,10 @@ The commit containing this section has the following local evidence on 2026-08-1
   include validated old/new Worker drain overlays whose dispatcher and
   reconciler flags must each have exactly one owner outside the intentional zero-owner
   handoff interval.
+  Before the combined restore, the gate separately starts the pinned split Hatchet
+  OSS engine/dashboard topology and requires one SDK-created terminal run from the
+  exact non-root Worker image. The probe is isolated from business data, storage,
+  and provider capabilities; its report and Compose logs are retained separately.
 
 These are engineering-tier results, not production evidence. `npm run test:postgres`
 fails closed without `TEST_POSTGRES_ADMIN_URL`; Docker/Hatchet restore tests, a real

@@ -189,7 +189,7 @@ jobs:
             [[ "$candidate" == "${image}:candidate-${GITHUB_SHA}-${GITHUB_RUN_ID}-"* ]]
             candidate_digest="$(docker buildx imagetools inspect "$candidate" --format '{{json .Manifest}}' | jq -er '.digest')"
             test "$candidate_digest" = "$digest"
-            tags="$(jq -nc --arg sha "${image}:sha-${GITHUB_SHA}" '[ $sha ]')"
+            tags='[]'
             if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/tags/* ]]; then
               tags="$(jq -nc --arg sha "${image}:sha-${GITHUB_SHA}" --arg release "${image}:${GITHUB_REF_NAME}" '[ $sha, $release ]')"
             fi
@@ -292,17 +292,13 @@ jobs:
             resolved="$(docker buildx imagetools inspect "$target" --format '{{json .Manifest}}' | jq -er '.digest')"
             test "$resolved" = "$expected"
           }
-          # A complete set of immutable SHA tags exists before any human-facing release tag.
-          for service in web api worker; do
-            image="ghcr.io/listencodes/infinite-canvas-${service}"
-            digest="$(jq -er --arg service "$service" '.images[$service].digest' "$RUNNER_TEMP/release-images.json")"
-            sha_tag="${image}:sha-${GITHUB_SHA}"
-            promote_immutable "$sha_tag" "${image}@${digest}" "$digest"
-          done
           if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/tags/* ]]; then
+            # The draft Release persists the complete set before any immutable tag is written.
             for service in web api worker; do
               image="ghcr.io/listencodes/infinite-canvas-${service}"
               digest="$(jq -er --arg service "$service" '.images[$service].digest' "$RUNNER_TEMP/release-images.json")"
+              sha_tag="${image}:sha-${GITHUB_SHA}"
+              promote_immutable "$sha_tag" "${image}@${digest}" "$digest"
               release_tag="${image}:${GITHUB_REF_NAME}"
               promote_immutable "$release_tag" "${image}@${digest}" "$digest"
             done

@@ -130,6 +130,78 @@ jobs:
           docker compose --env-file infra/compose/local/.env.example -f infra/compose/local/compose.yaml --profile application --profile tools --profile recovery config --quiet
           docker compose --env-file infra/compose/cloud/.env.example -f infra/compose/cloud/compose.yaml --profile tools --profile recovery config --quiet
           docker compose --env-file infra/compose/oss/.env.example -f infra/compose/oss/compose.yaml --profile application --profile tools --profile recovery config --quiet
+          for topology in cloud oss; do
+            profiles=()
+            if [[ "$topology" == oss ]]; then profiles=(--profile application); fi
+            for state in drain.env.example drain.handoff.env.example drain.candidate.env.example; do
+              docker compose \
+                --env-file "infra/compose/${topology}/.env.example" \
+                --env-file "infra/compose/${topology}/${state}" \
+                -f "infra/compose/${topology}/compose.yaml" \
+                -f "infra/compose/${topology}/drain.override.yaml" \
+                "${profiles[@]}" config --quiet
+            done
+          done
+      - name: Run split Hatchet OSS terminal smoke
+        shell: bash
+        env:
+          WORKER_IMAGE: infinite-canvas-worker:gate
+        run: |
+          set -Eeuo pipefail
+          smoke_dir="$RUNNER_TEMP/oss-hatchet-smoke"
+          mkdir -p "$smoke_dir"
+          chmod 700 "$smoke_dir"
+          : > "$smoke_dir/hatchet-token"
+          chmod 644 "$smoke_dir/hatchet-token"
+          : > "$smoke_dir/terminal-run.json"
+          : > "$smoke_dir/compose.log"
+
+          export HATCHET_SMOKE_TOKEN_FILE="$smoke_dir/hatchet-token"
+          export HATCHET_SMOKE_PROBE_PATH="$GITHUB_WORKSPACE/scripts/recovery/hatchet-terminal-probe.mjs"
+          export HATCHET_SMOKE_EVIDENCE_PATH="$GITHUB_WORKSPACE/scripts/recovery/hatchet-terminal-evidence.mjs"
+          export HATCHET_DATABASE_PASSWORD="$(openssl rand -hex 32)"
+          export HATCHET_PUBLIC_URL="http://hatchet-dashboard"
+          export HATCHET_COOKIE_DOMAIN="hatchet-dashboard"
+          project="ic-oss-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          compose=(docker compose --project-name "$project" --env-file infra/compose/oss/.env.example -f infra/compose/oss/compose.yaml -f infra/compose/oss/smoke.override.yaml --profile smoke)
+
+          cleanup() {
+            status=$?
+            set +e
+            : > "$HATCHET_SMOKE_TOKEN_FILE"
+            "${compose[@]}" logs --no-color > "$smoke_dir/compose.log" 2>&1
+            "${compose[@]}" down -v --remove-orphans >> "$smoke_dir/compose.log" 2>&1
+            exit "$status"
+          }
+          trap cleanup EXIT
+
+          "${compose[@]}" config --quiet
+          "${compose[@]}" up -d --wait hatchet-engine hatchet-dashboard
+          token_output="$("${compose[@]}" run --rm --no-deps hatchet-setup /hatchet/hatchet-admin token create --config /hatchet/config --name "release-gate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --expiresIn 1h)"
+          mapfile -t tokens < <(printf '%s' "$token_output" | grep -Eo '[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}')
+          test "${#tokens[@]}" -eq 1
+          printf '%s' "${tokens[0]}" > "$HATCHET_SMOKE_TOKEN_FILE"
+          chmod 644 "$HATCHET_SMOKE_TOKEN_FILE"
+          unset token_output tokens
+
+          "${compose[@]}" run --rm --no-deps hatchet-terminal-smoke > "$smoke_dir/terminal-run.json"
+          result="$(grep '^RECOVERY_HATCHET_PROBE_RESULT=' "$smoke_dir/terminal-run.json")"
+          test "$(grep -c '^RECOVERY_HATCHET_PROBE_RESULT=' "$smoke_dir/terminal-run.json")" -eq 1
+          printf '%s\n' "${result#RECOVERY_HATCHET_PROBE_RESULT=}" | jq -e '
+            .status == "COMPLETED" and
+            .taskName == "infinite-canvas-recovery-terminal-probe-v1" and
+            (.runId | type == "string" and length > 0) and
+            (.inputSha256 | test("^[a-f0-9]{64}$")) and
+            (.outputSha256 | test("^[a-f0-9]{64}$"))
+          ' >/dev/null
+      - name: Preserve split Hatchet OSS smoke evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: oss-hatchet-smoke-${{ github.sha }}
+          path: ${{ runner.temp }}/oss-hatchet-smoke
+          if-no-files-found: error
+          retention-days: 14
       - name: Run isolated combined recovery drill
         run: npm run recovery:drill -- --evidence-dir "$RUNNER_TEMP/recovery-evidence"
       - name: Preserve redacted recovery evidence

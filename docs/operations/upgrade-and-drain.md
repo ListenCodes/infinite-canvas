@@ -52,6 +52,51 @@ For Cloud, compose with `infra/compose/cloud/compose.yaml` and
 unspecified order. Do not use `--scale` on an owner-enabled service. The override
 labels both revisions for monitoring and evidence collection.
 
+Use the same Compose project name and the runtime env file for every command. Copy
+the three checked-in state examples to an operations directory outside Git, replace
+both image placeholders with the release digests, and keep the resulting files as
+release evidence. The following Cloud command contract is literal; for OSS replace
+`cloud` with `oss` and add `--profile application` to each command:
+
+```bash
+compose_dir=infra/compose/cloud
+runtime_env=/run/infinite-canvas/cloud.env
+prepared_env=/run/infinite-canvas/drain.prepared.env
+handoff_env=/run/infinite-canvas/drain.handoff.env
+candidate_env=/run/infinite-canvas/drain.candidate.env
+
+compose() {
+  local drain_env="$1"
+  shift
+  docker compose --project-name infinite-canvas-cloud \
+    --env-file "$runtime_env" --env-file "$drain_env" \
+    -f "$compose_dir/compose.yaml" -f "$compose_dir/drain.override.yaml" \
+    "$@"
+}
+
+node scripts/validate-deployment-config.mjs --env-file "$prepared_env"
+compose "$prepared_env" config --quiet
+compose "$prepared_env" up -d --no-deps worker worker-new api
+
+node scripts/validate-deployment-config.mjs --allow-zero-drain-owners \
+  --env-file "$handoff_env"
+compose "$handoff_env" config --quiet
+compose "$handoff_env" up -d --no-deps api
+compose "$handoff_env" up -d --no-deps worker-new
+compose "$handoff_env" up -d --no-deps worker
+
+node scripts/validate-deployment-config.mjs --env-file "$candidate_env"
+compose "$candidate_env" config --quiet
+compose "$candidate_env" up -d --no-deps worker-new
+compose "$candidate_env" up -d --no-deps api
+```
+
+`drain.env.example`, `drain.handoff.env.example`, and
+`drain.candidate.env.example` are the prepared, zero-owner, and candidate-owner
+templates respectively. Never concatenate them with the runtime env: later duplicate
+keys are hard to audit. Compose must receive both files with ordered `--env-file`
+arguments so the drain state overrides `GENERATION_WRITES_ENABLED` explicitly.
+
 ## Drain proof queries
 
 Record the maintenance start time before step 4. Run these read-only queries with
