@@ -26,11 +26,17 @@ test("ten concurrent idempotent creates and failed-slot retries preserve exact c
   const userId = "00000000-0000-4000-8000-00000000c001";
   const workspaceId = "00000000-0000-4000-8000-00000000c101";
   const projectId = "00000000-0000-4000-8000-00000000c201";
+  const providerCreateWorkspaceId = "00000000-0000-4000-8000-00000000c102";
+  const providerCreateProjectId = "00000000-0000-4000-8000-00000000c202";
   const channelId = "00000000-0000-4000-8000-00000000c301";
   const modelId = "00000000-0000-4000-8000-00000000c401";
   const priceId = "00000000-0000-4000-8000-00000000c501";
+  const providerCreateChannelId = "00000000-0000-4000-8000-00000000c302";
+  const providerCreateModelId = "00000000-0000-4000-8000-00000000c402";
+  const providerCreatePriceId = "00000000-0000-4000-8000-00000000c502";
   const unauthorizedUserId = "00000000-0000-4000-8000-00000000b001";
   const slots = ["slot-1", "slot-2", "slot-3"];
+  const providerCreateSlots = ["provider-create-slot-1", "provider-create-slot-2", "provider-create-slot-3"];
 
   try {
     await sql.begin(async (transaction) => {
@@ -46,11 +52,21 @@ test("ten concurrent idempotent creates and failed-slot retries preserve exact c
       `;
       await transaction`insert into workspaces (id, owner_user_id, name) values (${workspaceId}, ${userId}, 'Concurrency Workspace') on conflict do nothing`;
       await transaction`insert into workspace_members (workspace_id, user_id, role) values (${workspaceId}, ${userId}, 'owner') on conflict do nothing`;
+      await transaction`insert into workspaces (id, owner_user_id, name) values (${providerCreateWorkspaceId}, ${userId}, 'Provider Create Gate Workspace') on conflict do nothing`;
+      await transaction`insert into workspace_members (workspace_id, user_id, role) values (${providerCreateWorkspaceId}, ${userId}, 'owner') on conflict do nothing`;
       await transaction`
         insert into projects (id, workspace_id, title, document_json, updated_by)
         values (
           ${projectId}, ${workspaceId}, 'Concurrency Project',
           ${JSON.stringify({ document: { nodes: [{ id: "node-1", metadata: { images: slots.map((id) => ({ id })) } }] } })}::jsonb,
+          ${userId}
+        ) on conflict do nothing
+      `;
+      await transaction`
+        insert into projects (id, workspace_id, title, document_json, updated_by)
+        values (
+          ${providerCreateProjectId}, ${providerCreateWorkspaceId}, 'Provider Create Gate Project',
+          ${JSON.stringify({ document: { nodes: [{ id: "provider-create-node", metadata: { images: providerCreateSlots.map((id) => ({ id })) } }] } })}::jsonb,
           ${userId}
         ) on conflict do nothing
       `;
@@ -62,6 +78,16 @@ test("ten concurrent idempotent creates and failed-slot retries preserve exact c
       await transaction`
         insert into provider_credentials (id, channel_id, version, encrypted_secret, encrypted_data_key, nonce, key_id, secret_suffix)
         values (${randomUUID()}, ${channelId}, 1, 'encrypted', 'encrypted-key', 'nonce', 'integration', 'test')
+        on conflict (channel_id, version) do nothing
+      `;
+      await transaction`
+        insert into provider_channels (id, name, type, base_url, capabilities)
+        values (${providerCreateChannelId}, 'Provider Create Gate', 'grok2api', 'https://provider-create.example', '["image"]'::jsonb)
+        on conflict do nothing
+      `;
+      await transaction`
+        insert into provider_credentials (id, channel_id, version, encrypted_secret, encrypted_data_key, nonce, key_id, secret_suffix)
+        values (${randomUUID()}, ${providerCreateChannelId}, 1, 'encrypted', 'encrypted-key', 'nonce', 'integration', 'gate')
         on conflict (channel_id, version) do nothing
       `;
       await transaction`
@@ -78,12 +104,33 @@ test("ten concurrent idempotent creates and failed-slot retries preserve exact c
         on conflict do nothing
       `;
       await transaction`
+        insert into model_configs (
+          id, channel_id, model, capability, adapter_type, adapter_version, config_version,
+          limits_json, concurrency_limit, provider_idempotency_supported
+        ) values (${providerCreateModelId}, ${providerCreateChannelId}, 'provider-create-image', 'image', 'grok2api', 1, 1, '{"maxCount":3}'::jsonb, 3, false)
+        on conflict do nothing
+      `;
+      await transaction`
+        insert into provider_channel_capacity_policies (
+          channel_id, capability, version, concurrency_limit, rate_limit_per_minute
+        ) values (${providerCreateChannelId}, 'image', 1, 3, 60)
+        on conflict do nothing
+      `;
+      await transaction`
         insert into model_prices (id, model_config_id, version, conditions_json, credit_amount, effective_at)
         values (${priceId}, ${modelId}, 1, '{}'::jsonb, 10, now() - interval '1 minute') on conflict do nothing
       `;
       await transaction`
+        insert into model_prices (id, model_config_id, version, conditions_json, credit_amount, effective_at)
+        values (${providerCreatePriceId}, ${providerCreateModelId}, 1, '{}'::jsonb, 10, now() - interval '1 minute') on conflict do nothing
+      `;
+      await transaction`
         insert into wallet_accounts (workspace_id, available, reserved)
         values (${workspaceId}, 1000, 0) on conflict (workspace_id) do update set available = 1000, reserved = 0
+      `;
+      await transaction`
+        insert into wallet_accounts (workspace_id, available, reserved)
+        values (${providerCreateWorkspaceId}, 1000, 0) on conflict (workspace_id) do update set available = 1000, reserved = 0
       `;
     });
 
@@ -104,7 +151,7 @@ test("ten concurrent idempotent creates and failed-slot retries preserve exact c
     const counts = await sql.begin(async (transaction) => {
       await transaction`select set_config('app.service_role', 'on', true)`;
       return transaction<{
-        batches: number; jobs: number; attempts: number; reservations: number; outbox: number;
+        batches: number; jobs: number; attempts: number; reservations: number; outbox: number; pendingV2: number;
         requests: number; capacitySnapshots: number; capacityPayloads: number;
         available: string; reserved: string;
       }[]>`
@@ -136,6 +183,49 @@ test("ten concurrent idempotent creates and failed-slot retries preserve exact c
     assert.deepEqual(counts[0], {
       batches: 1, jobs: 3, attempts: 3, reservations: 3, outbox: 3, requests: 1,
       capacitySnapshots: 3, capacityPayloads: 3, available: "970", reserved: "30",
+    });
+
+    const providerCreateRequest = {
+      ...request,
+      projectId: providerCreateProjectId,
+      modelConfigId: providerCreateModelId,
+      target: { nodeId: "provider-create-node", slotIds: providerCreateSlots },
+      input: { ...request.input, prompt: "prove the provider create upper bound" },
+    };
+    const providerCreateResponses = await Promise.all(
+      Array.from({ length: 10 }, () =>
+        service.createBatch(userId, providerCreateRequest, "batch-provider-create-cap-0001"),
+      ),
+    );
+    assert.equal(new Set(providerCreateResponses.map(({ batchId: id }) => id)).size, 1);
+    const providerCreateBatchId = providerCreateResponses[0]!.batchId;
+    const providerCreateCounts = await sql.begin(async (transaction) => {
+      await transaction`select set_config('app.service_role', 'on', true)`;
+      await transaction`
+        update outbox_events
+        set available_at = now() + interval '1 day'
+        where aggregate_id in (select id from generation_jobs where batch_id = ${providerCreateBatchId})
+          and topic = 'generation.job.requested'
+      `;
+      return transaction<{
+        batches: number; jobs: number; attempts: number; reservations: number; outbox: number;
+        requests: number; available: string; reserved: string;
+      }[]>`
+        select
+          (select count(*)::int from generation_batches where id = ${providerCreateBatchId}) as batches,
+          (select count(*)::int from generation_jobs where batch_id = ${providerCreateBatchId}) as jobs,
+          (select count(*)::int from generation_attempts where job_id in (select id from generation_jobs where batch_id = ${providerCreateBatchId})) as attempts,
+          (select count(*)::int from credit_reservations where job_id in (select id from generation_jobs where batch_id = ${providerCreateBatchId})) as reservations,
+          (select count(*)::int from outbox_events where aggregate_id in (select id from generation_jobs where batch_id = ${providerCreateBatchId})) as outbox,
+          (select count(*)::int from outbox_events where aggregate_id in (select id from generation_jobs where batch_id = ${providerCreateBatchId}) and status = 'pending' and payload->>'schemaVersion' = '2') as "pendingV2",
+          (select count(*)::int from idempotency_requests where workspace_id = ${providerCreateWorkspaceId} and operation = 'batch.create' and key = 'batch-provider-create-cap-0001') as requests,
+          (select available::text from wallet_accounts where workspace_id = ${providerCreateWorkspaceId}) as available,
+          (select reserved::text from wallet_accounts where workspace_id = ${providerCreateWorkspaceId}) as reserved
+      `;
+    });
+    assert.deepEqual(providerCreateCounts[0], {
+      batches: 1, jobs: 3, attempts: 3, reservations: 3, outbox: 3, pendingV2: 3,
+      requests: 1, available: "970", reserved: "30",
     });
 
     await sql.begin(async (transaction) => {

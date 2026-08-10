@@ -641,3 +641,23 @@ test("release gate scans all browser storage layers with exact platform canaries
     "release-gate-service-secret-0001,release-gate-hatchet-secret-0002,release-gate-credential-secret-0003",
   );
 });
+
+test("release gate runs browser close and relogin recovery after the production Web build", async () => {
+  const workflow = parse(
+    await readFile(
+      resolve(repository, ".github/workflows/release-gate.yml"),
+      "utf8",
+    ),
+  );
+  const steps = workflow.jobs?.quality?.steps;
+  assert.ok(Array.isArray(steps));
+  const buildIndex = steps.findIndex(({ name }) => name === "Verify Web");
+  const recoveryIndex = steps.findIndex(
+    ({ name }) => name === "Verify browser close and relogin recovery",
+  );
+  assert.ok(buildIndex >= 0 && recoveryIndex > buildIndex);
+  assert.equal(
+    steps[recoveryIndex].run,
+    "npm run verify:browser-relogin-recovery",
+  );
+});

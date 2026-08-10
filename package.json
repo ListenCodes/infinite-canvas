@@ -23,6 +23,7 @@
     "recovery:drill": "node scripts/recovery/run-local-drill.mjs",
     "verify:recovery-boundary": "node scripts/verify-recovery-audit-boundary.mjs",
     "verify:browser-storage-boundary": "node scripts/verify-browser-storage-boundary.mjs",
+    "verify:browser-relogin-recovery": "node scripts/verify-browser-relogin-recovery.mjs",
     "test:deployment-config": "node --test scripts/validate-deployment-config.test.mjs scripts/verify-browser-storage-boundary.test.mjs scripts/recovery/recovery-fixtures.test.mjs",
     "test:unit": "npm run test -w @infinite-canvas/contracts && npm run test -w @infinite-canvas/domain && npm run test -w @infinite-canvas/provider-adapters",
     "db:generate": "npm run generate -w @infinite-canvas/db",

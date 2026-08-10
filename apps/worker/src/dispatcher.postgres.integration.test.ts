@@ -1207,3 +1207,197 @@ test(
     }
   },
 );
+
+test(
+  "ten idempotent API submissions result in exactly three provider creates",
+  { skip: !adminUrl },
+  async () => {
+    assert.ok(adminUrl);
+    const sql = postgres(runtimeUrl(adminUrl), { max: 6, prepare: false });
+    const workspaceId = "00000000-0000-4000-8000-00000000c102";
+    const channelId = "00000000-0000-4000-8000-00000000c302";
+    const config = loadWorkerConfig({
+      NODE_ENV: "test",
+      BUSINESS_DATABASE_URL: runtimeUrl(adminUrl),
+      HATCHET_MODE: "cloud",
+      HATCHET_CLIENT_TOKEN: "integration-token",
+      OUTBOX_BATCH_SIZE: "3",
+      CREDENTIAL_MASTER_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+      S3_REGION: "test",
+      S3_ENDPOINT: "https://storage.example",
+      S3_BUCKET: "test",
+      S3_ACCESS_KEY_ID: "test-access",
+      S3_SECRET_ACCESS_KEY: "test-secret",
+    });
+    const dispatched: {
+      workflow: string;
+      input: ReturnType<typeof generationWorkflowInputSchema.parse> & { dispatchToken: string };
+      runId: string;
+    }[] = [];
+    const hatchet = {
+      async runNoWait(workflow: string, input: ReturnType<typeof generationWorkflowInputSchema.parse> & { dispatchToken: string }) {
+        const runId = `provider-create-gate:${input.attemptId}`;
+        dispatched.push({ workflow, input, runId });
+        return { async getWorkflowRunId() { return runId; } };
+      },
+      runs: { async cancel() {} },
+    };
+
+    try {
+      const fixture = await sql.begin(async (transaction) => {
+        await transaction`select set_config('app.service_role', 'on', true)`;
+        const batches = await transaction<{ batch_id: string }[]>`
+          select response_body->>'batchId' as batch_id
+          from idempotency_requests
+          where workspace_id = ${workspaceId} and operation = 'batch.create'
+            and key = 'batch-provider-create-cap-0001'
+        `;
+        const batchId = batches[0]?.batch_id;
+        assert.ok(batchId);
+        const masterKey = Buffer.alloc(32);
+        const dataKey = randomBytes(32);
+        const nonce = randomBytes(12);
+        await transaction`
+          update provider_credentials
+          set encrypted_data_key = ${encrypt(masterKey, nonce, dataKey)},
+              encrypted_secret = ${encrypt(dataKey, nonce, Buffer.from("provider-create-secret"))},
+              nonce = ${nonce.toString("base64")}
+          where channel_id = ${channelId} and version = 1
+        `;
+        dataKey.fill(0);
+        await transaction`
+          update outbox_events
+          set available_at = timestamptz '2000-01-01 00:00:00+00'
+          where aggregate_id in (select id from generation_jobs where batch_id = ${batchId})
+            and topic = 'generation.job.requested' and status = 'pending'
+        `;
+        const rows = await transaction<{ jobs: number; attempts: number; reservations: number; outbox: number }[]>`
+          select
+            (select count(*)::int from generation_jobs where batch_id = ${batchId}) as jobs,
+            (select count(*)::int from generation_attempts where job_id in (select id from generation_jobs where batch_id = ${batchId}) and status = 'created') as attempts,
+            (select count(*)::int from credit_reservations where job_id in (select id from generation_jobs where batch_id = ${batchId}) and status = 'reserved') as reservations,
+            (select count(*)::int from outbox_events where aggregate_id in (select id from generation_jobs where batch_id = ${batchId}) and status = 'pending') as outbox
+        `;
+        assert.deepEqual(rows[0], { jobs: 3, attempts: 3, reservations: 3, outbox: 3 });
+        return { batchId };
+      });
+
+      const dispatcher = new OutboxDispatcher(sql, hatchet as never, config, "provider-create-gate");
+      assert.equal(await dispatcher.dispatchOnce(), 3);
+      assert.equal(dispatched.length, 3);
+      assert.equal(new Set(dispatched.map(({ input }) => input.jobId)).size, 3);
+      assert.equal(new Set(dispatched.map(({ input }) => input.attemptId)).size, 3);
+      assert.equal(new Set(dispatched.map(({ input }) => input.dispatchToken)).size, 3);
+      assert.ok(dispatched.every(({ workflow }) => workflow === "media-generation-v2"));
+
+      let submitCalls = 0;
+      let pollCalls = 0;
+      let materializeCalls = 0;
+      let recoverCalls = 0;
+      const registry = new AdapterRegistry();
+      registry.register({
+        type: "grok2api",
+        version: 1,
+        capability: "image",
+        validate() {},
+        async submit() {
+          submitCalls += 1;
+          return {
+            outcome: "completed",
+            mediaUrls: [`https://media.example/provider-create-${submitCalls}.png`],
+          };
+        },
+        async poll() {
+          pollCalls += 1;
+          return { status: "pending", nextPollDelayMs: 1_000 };
+        },
+      });
+      const repository = new GenerationRepository(
+        sql,
+        config,
+        registry,
+        { trustedOrigin: () => "https://storage.example" } as never,
+        randomUUID,
+      );
+      const executor = new GenerationExecutor(repository, {
+        async materialize(_url, identity) {
+          materializeCalls += 1;
+          return {
+            objectKey: `${identity.workspaceId}/generated/${identity.attemptId}/original`,
+            mime: "image/png",
+            bytes: 10n,
+            sha256: identity.attemptId.replaceAll("-", "").padEnd(64, "0").slice(0, 64),
+            kind: "image" as const,
+          };
+        },
+        async recoverMaterialized() {
+          recoverCalls += 1;
+          return undefined;
+        },
+      });
+      const results = await Promise.all(dispatched.map(({ input, runId }) =>
+        executor.execute(
+          generationWorkflowInputSchema.parse(input),
+          {
+            workflowRunId: runId,
+            dispatchToken: input.dispatchToken,
+            signal: new AbortController().signal,
+          },
+          {
+            acquireLease: () => repository.acquireChannelCapacity(input, input.dispatchToken, runId),
+            consumeProviderRequest: () => repository.consumeProviderRateCapacity(input, input.dispatchToken, runId),
+          },
+        ).then(async (result) => {
+          if (["terminal", "succeeded", "failed"].includes(result.outcome)) {
+            await repository.releaseChannelCapacity(input, input.dispatchToken);
+          }
+          return result;
+        }),
+      ));
+      assert.deepEqual(results.map(({ outcome }) => outcome), ["succeeded", "succeeded", "succeeded"]);
+      const replays = await Promise.all(dispatched.map(({ input, runId }) =>
+        executor.execute(generationWorkflowInputSchema.parse(input), {
+          workflowRunId: runId,
+          dispatchToken: input.dispatchToken,
+          signal: new AbortController().signal,
+        }),
+      ));
+      assert.deepEqual(replays.map(({ outcome }) => outcome), ["terminal", "terminal", "terminal"]);
+      assert.equal(submitCalls, 3);
+      assert.equal(pollCalls, 0);
+      assert.equal(materializeCalls, 3);
+      assert.equal(recoverCalls, 0);
+
+      const outcome = await sql.begin(async (transaction) => {
+        await transaction`select set_config('app.service_role', 'on', true)`;
+        return transaction<{
+          succeeded: number; assets: number; sent: number; executorRuns: number; settled: number;
+          reserves: number; settlements: number; releases: number; capacityLeases: number;
+          workspaceRateUsed: number; channelRateUsed: number; available: string; reservedCredits: string;
+        }[]>`
+          select
+            (select count(*)::int from generation_attempts where job_id in (select id from generation_jobs where batch_id = ${fixture.batchId}) and status = 'succeeded') as succeeded,
+            (select count(*)::int from assets where id in (select output_asset_id from generation_jobs where batch_id = ${fixture.batchId})) as assets,
+            (select count(*)::int from outbox_events where aggregate_id in (select id from generation_jobs where batch_id = ${fixture.batchId}) and status = 'sent') as sent,
+            (select count(*)::int from generation_attempts where job_id in (select id from generation_jobs where batch_id = ${fixture.batchId}) and executor_run_id = 'provider-create-gate:' || id::text) as "executorRuns",
+            (select count(*)::int from credit_reservations where job_id in (select id from generation_jobs where batch_id = ${fixture.batchId}) and status = 'settled') as settled,
+            (select count(*)::int from wallet_entries where reference_type = 'attempt' and reference_id in (select id from generation_attempts where job_id in (select id from generation_jobs where batch_id = ${fixture.batchId})) and kind = 'reserve') as reserves,
+            (select count(*)::int from wallet_entries where reference_type = 'attempt' and reference_id in (select id from generation_attempts where job_id in (select id from generation_jobs where batch_id = ${fixture.batchId})) and kind = 'settle') as settlements,
+            (select count(*)::int from wallet_entries where reference_type = 'attempt' and reference_id in (select id from generation_attempts where job_id in (select id from generation_jobs where batch_id = ${fixture.batchId})) and kind in ('release', 'release_after_unknown_timeout')) as releases,
+            (select count(*)::int from provider_channel_capacity_leases where holder_id in (select id from generation_attempts where job_id in (select id from generation_jobs where batch_id = ${fixture.batchId}))) as "capacityLeases",
+            coalesce((select sum(used)::int from generation_capacity_rate_windows where workspace_id = ${workspaceId} and capability = 'image'), 0) as "workspaceRateUsed",
+            coalesce((select sum(used)::int from generation_capacity_rate_windows where channel_id = ${channelId} and capability = 'image'), 0) as "channelRateUsed",
+            (select available::text from wallet_accounts where workspace_id = ${workspaceId}) as available,
+            (select reserved::text from wallet_accounts where workspace_id = ${workspaceId}) as "reservedCredits"
+        `;
+      });
+      assert.deepEqual(outcome[0], {
+        succeeded: 3, assets: 3, sent: 3, executorRuns: 3, settled: 3, reserves: 3,
+        settlements: 3, releases: 0, capacityLeases: 0,
+        workspaceRateUsed: 3, channelRateUsed: 3, available: "970", reservedCredits: "0",
+      });
+    } finally {
+      await sql.end();
+    }
+  },
+);
