@@ -11,6 +11,8 @@ import {
 } from "@infinite-canvas/db";
 import { z } from "zod";
 
+import { summarizeMigrationAudit } from "./recovery-audit-format.js";
+
 const configSchema = z.object({
   BUSINESS_DATABASE_URL: z.url(),
   S3_REGION: z.string().min(1),
@@ -120,7 +122,7 @@ async function main(): Promise<void> {
       async (transaction) => {
         await transaction`select set_config('app.service_role', 'on', true)`;
         const migrations = await transaction<
-          { name: string; sha256: string; applied_at: Date }[]
+          { name: string; sha256: string; applied_at: Date | string }[]
         >`
           select name, sha256, applied_at
           from app_schema_migrations
@@ -316,18 +318,7 @@ async function main(): Promise<void> {
       generatedAt: new Date().toISOString(),
       mode: "read_only_no_hatchet_no_provider",
       databaseRole: identity.role,
-      migrations: {
-        count: snapshot.migrations.length,
-        lastAppliedAt:
-          snapshot.migrations.length > 0
-            ? new Date(Math.max(...snapshot.migrations.map((migration) => migration.applied_at.getTime()))).toISOString()
-            : null,
-        entries: snapshot.migrations.map((migration) => ({
-          name: migration.name,
-          sha256: migration.sha256,
-          appliedAt: migration.applied_at.toISOString(),
-        })),
-      },
+      migrations: summarizeMigrationAudit(snapshot.migrations),
       counts: snapshot.counts,
       invariants: snapshot.invariants,
       activeAttempts: {
