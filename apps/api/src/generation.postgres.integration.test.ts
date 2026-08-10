@@ -767,16 +767,39 @@ test("ten concurrent idempotent creates and failed-slot retries preserve exact c
       await sql.begin(async (transaction) => {
         await transaction`select set_config('app.service_role', 'on', true)`;
         await transaction`
+          with fixture as (
+            select value, md5('pagination-user-' || value) as digest
+            from generate_series(1, 501) value
+          )
           insert into profiles (user_id, display_name, created_at)
-          select md5('pagination-user-' || value)::uuid, 'Pagination User ' || value, ${paginationTimestamp}::timestamptz
-          from generate_series(1, 501) value
+          select (
+                   substr(digest, 1, 8) || '-' || substr(digest, 9, 4) || '-4' ||
+                   substr(digest, 14, 3) || '-8' || substr(digest, 18, 3) || '-' || substr(digest, 21, 12)
+                 )::uuid,
+                 'Pagination User ' || value,
+                 ${paginationTimestamp}::timestamptz
+          from fixture
         `;
         await transaction`
+          with fixture as (
+            select value,
+                   md5('pagination-audit-' || value) as audit_digest,
+                   md5('pagination-target-' || value) as target_digest
+            from generate_series(1, 501) value
+          )
           insert into audit_logs (id, actor_type, action, target_type, target_id, reason, correlation_id, created_at)
-          select md5('pagination-audit-' || value)::uuid, 'system', 'pagination.fixture', 'fixture',
-                 md5('pagination-target-' || value)::uuid, 'pagination fixture', 'pagination-audit-' || value,
+          select (
+                   substr(audit_digest, 1, 8) || '-' || substr(audit_digest, 9, 4) || '-4' ||
+                   substr(audit_digest, 14, 3) || '-8' || substr(audit_digest, 18, 3) || '-' || substr(audit_digest, 21, 12)
+                 )::uuid,
+                 'system', 'pagination.fixture', 'fixture',
+                 (
+                   substr(target_digest, 1, 8) || '-' || substr(target_digest, 9, 4) || '-4' ||
+                   substr(target_digest, 14, 3) || '-8' || substr(target_digest, 18, 3) || '-' || substr(target_digest, 21, 12)
+                 )::uuid,
+                 'pagination fixture', 'pagination-audit-' || value,
                  ${paginationTimestamp}::timestamptz
-          from generate_series(1, 501) value
+          from fixture
         `;
         await transaction`update generation_jobs set created_at = ${paginationTimestamp}::timestamptz where workspace_id = ${workspaceId}`;
       });
