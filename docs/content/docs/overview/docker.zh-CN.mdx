@@ -7,7 +7,7 @@ description: 使用 Docker Compose 部署无限画布
 
 如果你希望在自己的机器或服务器上运行项目，可以直接使用 Docker Compose。
 
-## 使用发布镜像
+## 启动本地模式
 
 ```bash
 git clone git@github.com:basketikun/infinite-canvas.git
@@ -47,9 +47,19 @@ cd docs
 docker compose -f docker-compose.local.yml up -d --build
 ```
 
+## 完整云端模式
+
+根目录 Compose 只构建 Vite 静态前端，并以非 root Nginx 运行。完整服务栈位于：
+
+- `infra/compose/local`：Hatchet Lite、本地 PostgreSQL 和 S3 兼容对象存储，用于开发和可重复验收。
+- `infra/compose/cloud`：外部 Hatchet Cloud 与 managed Supabase。
+- `infra/compose/oss`：固定版本的 Hatchet OSS 控制面。
+
+云端模式必须同时部署固定 digest 的 `infinite-canvas-web`、`infinite-canvas-api` 和 `infinite-canvas-worker` 三个镜像，并配置 Auth、业务数据库、对象存储和 Hatchet。迁移、备份、回滚及 v1/v2 Worker drain 流程见仓库 `docs/operations/`；不要把示例中的 `replace-me` 当作可部署值。
+
 ## 数据说明
 
-当前主应用镜像只启动 Next.js。画布、我的素材、生成记录和 AI API Key 默认保存在浏览器本地；第三方提示词由浏览器前端直连拉取，不需要额外挂载数据目录。
+本地模式的画布、我的素材、生成记录和用户 API Key 默认保存在浏览器；第三方提示词由浏览器前端直连拉取，不需要服务端数据卷。云端模式则以业务 PostgreSQL 保存项目、任务、权限和积分事实，以私有对象存储保存资产，以 Hatchet 保存执行事实；平台密钥只存在于 API/Worker 服务端环境。
 
 ## 统计分析（可选）
 

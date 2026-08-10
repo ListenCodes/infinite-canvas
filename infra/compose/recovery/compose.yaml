@@ -1,0 +1,137 @@
+services:
+  business-db:
+    image: postgres:17.10-bookworm@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${RECOVERY_POSTGRES_PASSWORD:?required}
+      POSTGRES_DB: infinite_canvas
+    ports: ["127.0.0.1::5432"]
+    volumes: ["business-data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d infinite_canvas"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    networks: [recovery]
+
+  hatchet-db:
+    image: postgres:15.18-bookworm@sha256:e8db9bd3e9e1751eb639fb17be53cc6d1b62a322adf75b99e791767a7a16ce69
+    environment:
+      POSTGRES_USER: hatchet
+      POSTGRES_PASSWORD: ${RECOVERY_POSTGRES_PASSWORD:?required}
+      POSTGRES_DB: hatchet
+    ports: ["127.0.0.1::5432"]
+    volumes: ["hatchet-data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hatchet -d hatchet"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    networks: [recovery]
+
+  moto:
+    image: motoserver/moto:5.2.2@sha256:d8ae5edc2bf080e7e4c13f9bd4b29b53ac3b4427e92956318db3dbe23ec43eb7
+    environment:
+      MOTO_HOST: 0.0.0.0
+      MOTO_PORT: "5000"
+    ports: ["127.0.0.1::5000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.socket(); s.settimeout(2); raise SystemExit(s.connect_ex(('127.0.0.1', 5000)))"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    networks: [recovery]
+
+  hatchet-lite:
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-lite:v0.101.12@sha256:57bea9aa918c50c799122789ebbee9eb99a540df1d6e2a31f2dbbb87dec65fa3
+    environment:
+      DATABASE_URL: postgresql://hatchet:${RECOVERY_POSTGRES_PASSWORD}@hatchet-db:5432/hatchet?sslmode=disable
+      SERVER_URL: http://hatchet-lite:8888
+      SERVER_AUTH_COOKIE_DOMAIN: hatchet-lite:8888
+      SERVER_AUTH_COOKIE_INSECURE: "true"
+      SERVER_AUTH_SET_EMAIL_VERIFIED: "true"
+      SERVER_GRPC_BIND_ADDRESS: 0.0.0.0
+      SERVER_GRPC_PORT: "7077"
+      SERVER_GRPC_BROADCAST_ADDRESS: hatchet-lite:7077
+      SERVER_GRPC_INSECURE: "true"
+      SERVER_INTERNAL_CLIENT_INTERNAL_GRPC_BROADCAST_ADDRESS: hatchet-lite:7077
+      SERVER_MSGQUEUE_KIND: postgres
+    ports:
+      - "127.0.0.1::8888"
+      - "127.0.0.1::8733"
+    volumes: ["hatchet-config:/config"]
+    depends_on:
+      hatchet-db: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8733/ready >/dev/null"]
+      interval: 3s
+      timeout: 3s
+      retries: 60
+      start_period: 15s
+    networks: [recovery]
+
+  database-migrate:
+    profiles: ["tools"]
+    image: ${API_IMAGE:-infinite-canvas-api:gate}
+    command: ["node", "packages/db/dist/migrate.js"]
+    environment:
+      BUSINESS_DATABASE_MIGRATION_URL: postgresql://postgres:${RECOVERY_POSTGRES_PASSWORD}@business-db:5432/infinite_canvas
+    depends_on:
+      business-db: { condition: service_healthy }
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=128m"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    networks: [recovery]
+
+  database-provision-roles:
+    profiles: ["tools"]
+    image: ${API_IMAGE:-infinite-canvas-api:gate}
+    command: ["node", "packages/db/dist/provision-runtime-roles.js"]
+    environment:
+      BUSINESS_DATABASE_PROVISION_URL: postgresql://postgres:${RECOVERY_POSTGRES_PASSWORD}@business-db:5432/infinite_canvas
+      BUSINESS_DATABASE_OBJECT_OWNER_ROLE: postgres
+      BUSINESS_DATABASE_API_ROLE: infinite_canvas_api_recovery_drill
+      BUSINESS_DATABASE_API_PASSWORD: ${RECOVERY_API_PASSWORD:?required}
+      BUSINESS_DATABASE_WORKER_ROLE: infinite_canvas_worker_recovery_drill
+      BUSINESS_DATABASE_WORKER_PASSWORD: ${RECOVERY_WORKER_PASSWORD:?required}
+      BUSINESS_DATABASE_RECOVERY_AUDIT_ROLE: infinite_canvas_recovery_drill
+      BUSINESS_DATABASE_RECOVERY_AUDIT_PASSWORD: ${RECOVERY_AUDIT_PASSWORD:?required}
+    depends_on:
+      business-db: { condition: service_healthy }
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=128m"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    networks: [recovery]
+
+  recovery-audit:
+    profiles: ["recovery"]
+    image: ${WORKER_IMAGE:-infinite-canvas-worker:gate}
+    command: ["node", "apps/worker/dist/recovery-audit.js"]
+    environment:
+      BUSINESS_DATABASE_URL: postgresql://infinite_canvas_recovery_drill:${RECOVERY_AUDIT_PASSWORD}@business-db:5432/infinite_canvas
+      S3_REGION: us-east-1
+      S3_ENDPOINT: http://moto:5000
+      S3_BUCKET: infinite-canvas-recovery
+      S3_ACCESS_KEY_ID: recovery-drill
+      S3_SECRET_ACCESS_KEY: recovery-drill
+      S3_FORCE_PATH_STYLE: "true"
+      RECOVERY_AUDIT_INCLUDE_IDENTIFIERS: "true"
+      RECOVERY_AUDIT_OBJECT_CONCURRENCY: "2"
+    depends_on:
+      business-db: { condition: service_healthy }
+      moto: { condition: service_healthy }
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=128m"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    networks: [recovery]
+
+volumes:
+  business-data: {}
+  hatchet-data: {}
+  hatchet-config: {}
+
+networks:
+  recovery: { internal: true }

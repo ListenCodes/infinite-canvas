@@ -1,0 +1,176 @@
+name: infinite-canvas-local
+
+services:
+  hatchet-db:
+    image: postgres:15.18-bookworm@sha256:e8db9bd3e9e1751eb639fb17be53cc6d1b62a322adf75b99e791767a7a16ce69
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: hatchet
+      POSTGRES_PASSWORD: ${HATCHET_DATABASE_PASSWORD:?required}
+      POSTGRES_DB: hatchet
+    volumes: ["hatchet-postgres:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hatchet -d hatchet"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [hatchet]
+
+  hatchet-lite:
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-lite:v0.101.12@sha256:57bea9aa918c50c799122789ebbee9eb99a540df1d6e2a31f2dbbb87dec65fa3
+    restart: unless-stopped
+    depends_on:
+      hatchet-db: { condition: service_healthy }
+    environment:
+      DATABASE_URL: postgresql://hatchet:${HATCHET_DATABASE_PASSWORD}@hatchet-db:5432/hatchet?sslmode=disable
+      SERVER_URL: http://localhost:8888
+      SERVER_AUTH_COOKIE_DOMAIN: localhost:8888
+      SERVER_AUTH_COOKIE_INSECURE: "true"
+      SERVER_AUTH_SET_EMAIL_VERIFIED: "true"
+      SERVER_GRPC_BIND_ADDRESS: 0.0.0.0
+      SERVER_GRPC_PORT: 7077
+      SERVER_GRPC_BROADCAST_ADDRESS: localhost:7077
+      SERVER_GRPC_INSECURE: "true"
+      SERVER_INTERNAL_CLIENT_INTERNAL_GRPC_BROADCAST_ADDRESS: localhost:7077
+      SERVER_MSGQUEUE_KIND: postgres
+    ports:
+      - "127.0.0.1:8888:8888"
+      - "127.0.0.1:7077:7077"
+    volumes: ["hatchet-config:/config"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8733/ready >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    networks: [hatchet, app]
+
+  web:
+    profiles: ["application"]
+    build:
+      context: ../../..
+      dockerfile: Dockerfile
+    image: infinite-canvas-web:local
+    ports: ["127.0.0.1:3000:3000"]
+    environment:
+      CLOUD_BACKEND_ENABLED: "true"
+      API_BASE_URL: http://localhost:3001
+      SUPABASE_URL: ${PUBLIC_SUPABASE_URL:?required}
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:?required}
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    networks: [app]
+
+  api:
+    profiles: ["application"]
+    build:
+      context: ../../..
+      dockerfile: apps/api/Dockerfile
+    image: infinite-canvas-api:local
+    restart: unless-stopped
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    ports: ["127.0.0.1:3001:3001"]
+    environment:
+      NODE_ENV: development
+      METRICS_BEARER_TOKEN: ${METRICS_BEARER_TOKEN:-local-metrics-token-change-before-sharing}
+      BUSINESS_DATABASE_URL: ${BUSINESS_DATABASE_URL_API:?required}
+      BUSINESS_DATABASE_LISTENER_URL: ${BUSINESS_DATABASE_LISTENER_URL:?direct-connection-required}
+      SUPABASE_URL: ${INTERNAL_SUPABASE_URL:?required}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:?required}
+      CREDENTIAL_MASTER_KEY: ${CREDENTIAL_MASTER_KEY:?required}
+      STORAGE_BUCKET: infinite-canvas-assets
+      CORS_ALLOWED_ORIGINS: http://localhost:3000
+      TRUST_PROXY: "false"
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=1g"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    networks: [app]
+
+  worker:
+    profiles: ["application"]
+    build:
+      context: ../../..
+      dockerfile: apps/worker/Dockerfile
+    image: infinite-canvas-worker:local
+    restart: unless-stopped
+    depends_on:
+      hatchet-lite: { condition: service_healthy }
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    environment:
+      NODE_ENV: development
+      BUSINESS_DATABASE_URL: ${BUSINESS_DATABASE_URL_WORKER:?required}
+      SUPABASE_URL: ${INTERNAL_SUPABASE_URL:?required}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:?required}
+      HATCHET_MODE: lite
+      HATCHET_CLIENT_TOKEN: ${HATCHET_CLIENT_TOKEN:?required}
+      HATCHET_CLIENT_HOST_PORT: hatchet-lite:7077
+      HATCHET_CLIENT_API_URL: http://hatchet-lite:8888
+      HATCHET_CLIENT_TLS_STRATEGY: none
+      HATCHET_NAMESPACE: infinite-canvas-local
+      CREDENTIAL_MASTER_KEY: ${CREDENTIAL_MASTER_KEY:?required}
+      S3_REGION: local
+      S3_ENDPOINT: ${INTERNAL_SUPABASE_URL:?required}/storage/v1/s3
+      S3_BUCKET: infinite-canvas-assets
+      S3_ACCESS_KEY_ID: ${LOCAL_S3_ACCESS_KEY_ID:?required}
+      S3_SECRET_ACCESS_KEY: ${LOCAL_S3_SECRET_ACCESS_KEY:?required}
+      S3_FORCE_PATH_STYLE: "true"
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=2g"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    stop_grace_period: 50m
+    networks: [app]
+
+  recovery-audit:
+    profiles: ["recovery"]
+    build:
+      context: ../../..
+      dockerfile: apps/worker/Dockerfile
+    image: infinite-canvas-worker:local
+    command: ["node", "apps/worker/dist/recovery-audit.js"]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    environment:
+      BUSINESS_DATABASE_URL: ${BUSINESS_DATABASE_URL_RECOVERY_AUDIT:?required}
+      S3_REGION: local
+      S3_ENDPOINT: ${INTERNAL_SUPABASE_URL:?required}/storage/v1/s3
+      S3_BUCKET: infinite-canvas-assets
+      S3_ACCESS_KEY_ID: ${LOCAL_S3_ACCESS_KEY_ID:?required}
+      S3_SECRET_ACCESS_KEY: ${LOCAL_S3_SECRET_ACCESS_KEY:?required}
+      S3_FORCE_PATH_STYLE: "true"
+      RECOVERY_AUDIT_INCLUDE_IDENTIFIERS: ${RECOVERY_AUDIT_INCLUDE_IDENTIFIERS:-false}
+      RECOVERY_AUDIT_OBJECT_CONCURRENCY: ${RECOVERY_AUDIT_OBJECT_CONCURRENCY:-4}
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    networks: [app]
+
+  database-migrate:
+    profiles: ["tools"]
+    image: infinite-canvas-api:local
+    command: ["node", "packages/db/dist/migrate.js"]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    environment:
+      BUSINESS_DATABASE_MIGRATION_URL: ${BUSINESS_DATABASE_MIGRATION_URL:?required}
+    networks: [app]
+
+  database-provision-roles:
+    profiles: ["tools"]
+    image: infinite-canvas-api:local
+    command: ["node", "packages/db/dist/provision-runtime-roles.js"]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    environment:
+      BUSINESS_DATABASE_PROVISION_URL: ${BUSINESS_DATABASE_PROVISION_URL:?required}
+      BUSINESS_DATABASE_OBJECT_OWNER_ROLE: ${BUSINESS_DATABASE_OBJECT_OWNER_ROLE:?required}
+      BUSINESS_DATABASE_API_PASSWORD: ${BUSINESS_DATABASE_API_PASSWORD:?required}
+      BUSINESS_DATABASE_WORKER_PASSWORD: ${BUSINESS_DATABASE_WORKER_PASSWORD:?required}
+      BUSINESS_DATABASE_RECOVERY_AUDIT_PASSWORD: ${BUSINESS_DATABASE_RECOVERY_AUDIT_PASSWORD:?required}
+    networks: [app]
+
+volumes:
+  hatchet-postgres: {}
+  hatchet-config: {}
+
+networks:
+  hatchet: { internal: true }
+  app: {}

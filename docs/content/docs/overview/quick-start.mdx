@@ -5,11 +5,11 @@ description: Run Infinite Canvas in a few steps
 
 # Quick Start
 
-To try the project, deploy or start the `web/` frontend.
+To try the project, deploy or start the `web/` frontend in backward-compatible local mode. Deploy the complete Hatchet cloud runtime when you need accounts, durable server-side tasks, and cross-device assets.
 
 ## Deploy with Vercel
 
-Import the repository into Vercel. The root `vercel.json` builds `web/`. AI requests are sent directly from the browser to your OpenAI-compatible endpoint, so no additional application server is required.
+Import the repository into Vercel. The root `vercel.json` builds `web/`. This is a local-mode deployment: AI requests are sent directly from the browser to the user's OpenAI-compatible endpoint, so no application server is required.
 
 ## Run locally
 
@@ -35,4 +35,4 @@ docker run --rm -p 3000:3000 infinite-canvas
 - Open `/prompts` to fetch prompt repositories directly from the browser and cache them in IndexedDB.
 - Configure WebDAV if you want to synchronize canvases, assets, and generation history across devices.
 
-Canvas projects and My Assets are primarily stored in the browser. The API key is also stored locally and used by the browser to call OpenAI-compatible endpoints directly.
+When only `web/` is running, canvas projects, My Assets, and user API keys remain in the browser. Complete local, Hatchet Cloud, and Hatchet OSS service stacks are under `infra/compose`; read `docs/operations/deployment.md` before enabling cloud mode. Platform provider keys and Hatchet tokens belong only in API/Worker server environments.

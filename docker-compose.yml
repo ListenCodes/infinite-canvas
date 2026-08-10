@@ -1,10 +1,21 @@
 services:
   app:
-    image: ghcr.io/basketikun/infinite-canvas:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: infinite-canvas-web:local
     container_name: infinite-canvas
     ports:
       - "3000:3000"
     restart: unless-stopped
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
     # 统计分析（可选，默认关闭）。每家一个独立变量，填了谁就启用谁，可同时启用多家：
     # environment:
     #   ANALYTICS_GA4_ID: G-XXXXXXXXXX                    # Google Analytics 4 衡量 ID

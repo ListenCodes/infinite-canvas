@@ -1,4 +1,4 @@
-FROM oven/bun:1.3.13 AS docs-build
+FROM oven/bun:1.3.13@sha256:87416c977a612a204eb54ab9f3927023c2a3c971f4f345a01da08ea6262ae30e AS docs-build
 
 WORKDIR /app
 COPY docs/package.json docs/bun.lock ./
@@ -8,7 +8,7 @@ COPY CHANGELOG.md /CHANGELOG.md
 RUN bun run postinstall
 RUN bun run build
 
-FROM node:22-bookworm-slim
+FROM node:24.16.0-bookworm-slim@sha256:2c87ef9bd3c6a3bd4b472b4bec2ce9d16354b0c574f736c476489d09f560a203
 
 WORKDIR /app
 ENV NODE_ENV=production

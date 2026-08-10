@@ -1,0 +1,223 @@
+name: infinite-canvas-oss
+
+services:
+  hatchet-postgres:
+    image: postgres:15.18-bookworm@sha256:e8db9bd3e9e1751eb639fb17be53cc6d1b62a322adf75b99e791767a7a16ce69
+    restart: always
+    command: ["postgres", "-c", "max_connections=500"]
+    environment:
+      POSTGRES_USER: hatchet
+      POSTGRES_PASSWORD: ${HATCHET_DATABASE_PASSWORD:?required}
+      POSTGRES_DB: hatchet
+    volumes: ["hatchet-postgres:/var/lib/postgresql/data"]
+    shm_size: 1g
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hatchet -d hatchet"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+    networks: [hatchet-control]
+
+  hatchet-migrate:
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-migrate:v0.101.12@sha256:aa72a57c9c7c922f4520d4a7389bb5067ff095de6c2924e319f0a0da70be5f7b
+    command: ["/hatchet/hatchet-migrate"]
+    environment:
+      DATABASE_URL: postgresql://hatchet:${HATCHET_DATABASE_PASSWORD}@hatchet-postgres:5432/hatchet?sslmode=disable
+    depends_on:
+      hatchet-postgres: { condition: service_healthy }
+    networks: [hatchet-control]
+
+  hatchet-setup:
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-admin:v0.101.12@sha256:fabdbbfa91934197eb8584c35bae3b84ba541e8fe29400dd72ac8910709fe99c
+    command:
+      [
+        "/hatchet/hatchet-admin",
+        "quickstart",
+        "--skip",
+        "certs",
+        "--generated-config-dir",
+        "/hatchet/config",
+        "--overwrite=false",
+      ]
+    environment:
+      DATABASE_URL: postgresql://hatchet:${HATCHET_DATABASE_PASSWORD}@hatchet-postgres:5432/hatchet?sslmode=disable
+      SERVER_URL: ${HATCHET_PUBLIC_URL:?required}
+      SERVER_AUTH_COOKIE_DOMAIN: ${HATCHET_COOKIE_DOMAIN:?required}
+      SERVER_AUTH_COOKIE_INSECURE: "false"
+      SERVER_GRPC_BIND_ADDRESS: 0.0.0.0
+      SERVER_GRPC_INSECURE: "true"
+      SERVER_GRPC_BROADCAST_ADDRESS: hatchet-engine:7070
+      SERVER_INTERNAL_CLIENT_INTERNAL_GRPC_BROADCAST_ADDRESS: hatchet-engine:7070
+      SERVER_MSGQUEUE_KIND: postgres
+      SERVER_OBSERVABILITY_ENABLED: "true"
+    volumes: ["hatchet-config:/hatchet/config"]
+    depends_on:
+      hatchet-migrate: { condition: service_completed_successfully }
+    networks: [hatchet-control]
+
+  hatchet-engine:
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-engine:v0.101.12@sha256:b9d8d8965389d1240afba97a10b49c9ca214419c89d26f0ca27e7e74bee943d0
+    command: ["/hatchet/hatchet-engine", "--config", "/hatchet/config"]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://hatchet:${HATCHET_DATABASE_PASSWORD}@hatchet-postgres:5432/hatchet?sslmode=disable
+      SERVER_GRPC_BIND_ADDRESS: 0.0.0.0
+      SERVER_GRPC_INSECURE: "true"
+      SERVER_MSGQUEUE_KIND: postgres
+      SERVER_OBSERVABILITY_ENABLED: "true"
+    volumes: ["hatchet-config:/hatchet/config:ro"]
+    depends_on:
+      hatchet-setup: { condition: service_completed_successfully }
+    expose: ["7070", "8733"]
+    healthcheck:
+      test:
+        ["CMD", "/usr/bin/wget", "-q", "-O", "-", "http://127.0.0.1:8733/ready"]
+      interval: 10s
+      timeout: 6s
+      retries: 12
+      start_period: 20s
+    networks: [hatchet-control, app-backend]
+
+  hatchet-dashboard:
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-dashboard:v0.101.12@sha256:60f23c7aa4c9a8c0ae96e66d0c94fdd802f87b657676d0e6b4e11420e7cc21dd
+    command: ["sh", "./entrypoint.sh", "--config", "/hatchet/config"]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://hatchet:${HATCHET_DATABASE_PASSWORD}@hatchet-postgres:5432/hatchet?sslmode=disable
+    volumes: ["hatchet-config:/hatchet/config:ro"]
+    depends_on:
+      hatchet-setup: { condition: service_completed_successfully }
+    ports: ["${HATCHET_DASHBOARD_BIND:-127.0.0.1:8080}:80"]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "/usr/bin/curl",
+          "--fail",
+          "--silent",
+          "--show-error",
+          "http://127.0.0.1/api/ready",
+        ]
+      interval: 10s
+      timeout: 6s
+      retries: 12
+      start_period: 20s
+    networks: [hatchet-control, app-backend]
+
+  web:
+    profiles: ["application"]
+    image: ${WEB_IMAGE:?immutable-digest-required}
+    restart: unless-stopped
+    ports: ["${WEB_BIND:-127.0.0.1:3000}:3000"]
+    environment:
+      CLOUD_BACKEND_ENABLED: "true"
+      API_BASE_URL: ${API_BASE_URL:?required}
+      SUPABASE_URL: ${SUPABASE_URL:?required}
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:?public-key-required}
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    networks: [app-frontend]
+
+  api:
+    profiles: ["application"]
+    image: ${API_IMAGE:?immutable-digest-required}
+    restart: unless-stopped
+    ports: ["${API_BIND:-127.0.0.1:3001}:3001"]
+    environment:
+      NODE_ENV: production
+      METRICS_BEARER_TOKEN: ${METRICS_BEARER_TOKEN:?required}
+      BUSINESS_DATABASE_URL: ${BUSINESS_DATABASE_URL_API:?required}
+      BUSINESS_DATABASE_LISTENER_URL: ${BUSINESS_DATABASE_LISTENER_URL:?direct-or-session-connection-required}
+      SUPABASE_URL: ${SUPABASE_URL:?required}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:?required}
+      CREDENTIAL_MASTER_KEY: ${CREDENTIAL_MASTER_KEY:?required}
+      STORAGE_BUCKET: ${S3_BUCKET:?required}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:?required}
+      TRUST_PROXY: "true"
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=1g"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    networks: [app-frontend, app-backend]
+
+  worker:
+    profiles: ["application"]
+    image: ${WORKER_IMAGE:?immutable-digest-required}
+    restart: unless-stopped
+    depends_on:
+      hatchet-engine: { condition: service_healthy }
+      hatchet-dashboard: { condition: service_healthy }
+    environment:
+      NODE_ENV: production
+      BUSINESS_DATABASE_URL: ${BUSINESS_DATABASE_URL_WORKER:?required}
+      SUPABASE_URL: ${SUPABASE_URL:?required}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:?required}
+      HATCHET_MODE: oss
+      HATCHET_CLIENT_TOKEN: ${HATCHET_CLIENT_TOKEN:?required}
+      HATCHET_CLIENT_HOST_PORT: hatchet-engine:7070
+      HATCHET_CLIENT_API_URL: http://hatchet-dashboard
+      HATCHET_CLIENT_TLS_STRATEGY: none
+      HATCHET_NAMESPACE: ${HATCHET_NAMESPACE:-infinite-canvas}
+      CREDENTIAL_MASTER_KEY: ${CREDENTIAL_MASTER_KEY:?required}
+      S3_REGION: ${S3_REGION:?required}
+      S3_ENDPOINT: ${S3_ENDPOINT:?required}
+      S3_BUCKET: ${S3_BUCKET:?required}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?required}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?required}
+      S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-false}
+      OUTBOX_DISPATCHER_ENABLED: ${OUTBOX_DISPATCHER_ENABLED:-true}
+      UNKNOWN_RECONCILER_ENABLED: ${UNKNOWN_RECONCILER_ENABLED:-true}
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=2g"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    stop_grace_period: 50m
+    networks: [app-backend]
+
+  recovery-audit:
+    profiles: ["recovery"]
+    image: ${WORKER_IMAGE:?immutable-digest-required}
+    command: ["node", "apps/worker/dist/recovery-audit.js"]
+    environment:
+      BUSINESS_DATABASE_URL: ${BUSINESS_DATABASE_URL_RECOVERY_AUDIT:?required}
+      S3_REGION: ${S3_REGION:?required}
+      S3_ENDPOINT: ${S3_ENDPOINT:?required}
+      S3_BUCKET: ${S3_BUCKET:?required}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?required}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?required}
+      S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-false}
+      RECOVERY_AUDIT_INCLUDE_IDENTIFIERS: ${RECOVERY_AUDIT_INCLUDE_IDENTIFIERS:-false}
+      RECOVERY_AUDIT_OBJECT_CONCURRENCY: ${RECOVERY_AUDIT_OBJECT_CONCURRENCY:-4}
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    networks: [app-backend]
+
+  database-migrate:
+    profiles: ["tools"]
+    image: ${API_IMAGE:?immutable-digest-required}
+    command: ["node", "packages/db/dist/migrate.js"]
+    environment:
+      BUSINESS_DATABASE_MIGRATION_URL: ${BUSINESS_DATABASE_MIGRATION_URL:?required}
+    networks: [app-backend]
+
+  database-provision-roles:
+    profiles: ["tools"]
+    image: ${API_IMAGE:?immutable-digest-required}
+    command: ["node", "packages/db/dist/provision-runtime-roles.js"]
+    environment:
+      BUSINESS_DATABASE_PROVISION_URL: ${BUSINESS_DATABASE_PROVISION_URL:?required}
+      BUSINESS_DATABASE_OBJECT_OWNER_ROLE: ${BUSINESS_DATABASE_OBJECT_OWNER_ROLE:?required}
+      BUSINESS_DATABASE_API_PASSWORD: ${BUSINESS_DATABASE_API_PASSWORD:?required}
+      BUSINESS_DATABASE_WORKER_PASSWORD: ${BUSINESS_DATABASE_WORKER_PASSWORD:?required}
+      BUSINESS_DATABASE_RECOVERY_AUDIT_PASSWORD: ${BUSINESS_DATABASE_RECOVERY_AUDIT_PASSWORD:?required}
+    networks: [app-backend]
+
+volumes:
+  hatchet-postgres: {}
+  hatchet-config: {}
+
+networks:
+  hatchet-control: { internal: true }
+  app-backend: {}
+  app-frontend: {}

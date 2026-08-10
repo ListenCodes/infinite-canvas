@@ -1,4 +1,4 @@
-name: Docker image
+name: Service images
 
 on:
   push:
@@ -9,107 +9,302 @@ permissions:
   contents: read
   packages: write
 
-env:
-  IMAGE_NAME: ghcr.io/listencodes/infinite-canvas
+concurrency:
+  group: service-images-${{ github.sha }}
+  cancel-in-progress: false
 
 jobs:
-  meta:
-    runs-on: ubuntu-latest
-    outputs:
-      tags: ${{ steps.meta.outputs.tags }}
-      labels: ${{ steps.meta.outputs.labels }}
+  validate-invocation:
+    runs-on: ubuntu-24.04
     steps:
-      - id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.IMAGE_NAME }}
-          tags: |
-            type=ref,event=tag
-            type=sha,prefix=
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Validate release invocation
+        shell: bash
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            test "$GITHUB_REF" = refs/heads/main
+          else
+            test "$GITHUB_EVENT_NAME" = push
+            test "$GITHUB_REF" = "refs/tags/$(tr -d '\r\n' < VERSION)"
+          fi
+
+  release-gate:
+    uses: ./.github/workflows/release-gate.yml
 
   build:
-    needs: meta
+    needs: [validate-invocation, release-gate]
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - platform: linux/amd64
+          - service: web
+            dockerfile: ./Dockerfile
+            platform: linux/amd64
             arch: amd64
             runner: ubuntu-latest
-          - platform: linux/arm64
+          - service: web
+            dockerfile: ./Dockerfile
+            platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+          - service: api
+            dockerfile: ./apps/api/Dockerfile
+            platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-latest
+          - service: api
+            dockerfile: ./apps/api/Dockerfile
+            platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+          - service: worker
+            dockerfile: ./apps/worker/Dockerfile
+            platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-latest
+          - service: worker
+            dockerfile: ./apps/worker/Dockerfile
+            platform: linux/arm64
             arch: arm64
             runner: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: docker/setup-buildx-action@v3
-
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
       - id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
+          file: ${{ matrix.dockerfile }}
           platforms: ${{ matrix.platform }}
-          labels: ${{ needs.meta.outputs.labels }}
-          outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=gha,scope=app-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=app-${{ matrix.arch }}
-
+          outputs: type=image,name=ghcr.io/listencodes/infinite-canvas-${{ matrix.service }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.service }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}-${{ matrix.arch }}
       - name: Export digest
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/digests"
           digest="${{ steps.build.outputs.digest }}"
           touch "$RUNNER_TEMP/digests/${digest#sha256:}"
-
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: digests-${{ matrix.arch }}
+          name: digests-${{ matrix.service }}-${{ matrix.arch }}
           path: ${{ runner.temp }}/digests/*
           if-no-files-found: error
           retention-days: 1
 
   merge:
-    needs:
-      - meta
-      - build
+    needs: build
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [web, api, worker]
     steps:
-      - uses: docker/setup-buildx-action@v3
-
-      - uses: docker/login-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: ${{ runner.temp }}/digests
-          pattern: digests-*
+          pattern: digests-${{ matrix.service }}-*
           merge-multiple: true
-
       - name: Create multi-arch manifest
         shell: bash
-        env:
-          TAGS: ${{ needs.meta.outputs.tags }}
         run: |
-          tag_args=()
-          while IFS= read -r tag; do
-            if [ -n "$tag" ]; then
-              tag_args+=("-t" "$tag")
-            fi
-          done <<< "$TAGS"
-
+          image="ghcr.io/listencodes/infinite-canvas-${{ matrix.service }}"
+          mkdir -p "$RUNNER_TEMP/release-metadata"
+          candidate_tag="${image}:candidate-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mapfile -t digest_files < <(find "$RUNNER_TEMP/digests" -type f -printf '%f\n' | sort)
+          test "${#digest_files[@]}" -eq 2
           digest_args=()
-          while IFS= read -r digest_file; do
-            digest_args+=("${IMAGE_NAME}@sha256:${digest_file}")
-          done < <(find "$RUNNER_TEMP/digests" -type f -printf '%f\n' | sort)
+          for digest_file in "${digest_files[@]}"; do
+            [[ "$digest_file" =~ ^[a-f0-9]{64}$ ]]
+            digest_args+=("${image}@sha256:${digest_file}")
+          done
+          docker buildx imagetools create \
+            -t "$candidate_tag" "${digest_args[@]}" \
+            --metadata-file "$RUNNER_TEMP/release-metadata/${{ matrix.service }}.json"
+          printf '%s\n' "$candidate_tag" > "$RUNNER_TEMP/release-metadata/${{ matrix.service }}.candidate"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-metadata-${{ matrix.service }}
+          path: |
+            ${{ runner.temp }}/release-metadata/${{ matrix.service }}.json
+            ${{ runner.temp }}/release-metadata/${{ matrix.service }}.candidate
+          if-no-files-found: error
+          retention-days: 90
 
-          docker buildx imagetools create "${tag_args[@]}" "${digest_args[@]}"
+  verify-and-promote-release-manifest:
+    needs: merge
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: ${{ runner.temp }}/release-metadata
+          pattern: release-metadata-*
+          merge-multiple: true
+      - name: Verify immutable multi-arch manifests
+        shell: bash
+        run: |
+          : > "$RUNNER_TEMP/release-images.env"
+          mkdir -p "$RUNNER_TEMP/release-services"
+          for service in web api worker; do
+            metadata="$RUNNER_TEMP/release-metadata/${service}.json"
+            digest="$(jq -er '."containerimage.descriptor".digest | select(test("^sha256:[a-f0-9]{64}$"))' "$metadata")"
+            image="ghcr.io/listencodes/infinite-canvas-${service}"
+            manifest="$RUNNER_TEMP/${service}-manifest.json"
+            docker buildx imagetools inspect "${image}@${digest}" --format '{{json .Manifest}}' > "$manifest"
+            jq -e --arg digest "$digest" '
+              .digest == $digest and
+              ([.manifests[] | select(.platform.os == "linux" and (.platform.architecture == "amd64" or .platform.architecture == "arm64")) | (.platform.os + "/" + .platform.architecture)] | unique | sort) == ["linux/amd64", "linux/arm64"] and
+              ([.manifests[] | select(.platform.os == "linux" and (.platform.architecture != "amd64" and .platform.architecture != "arm64"))] | length) == 0
+            ' "$manifest" >/dev/null
+            printf '%s_IMAGE=%s@%s\n' "${service^^}" "$image" "$digest" >> "$RUNNER_TEMP/release-images.env"
+            candidate="$(<"$RUNNER_TEMP/release-metadata/${service}.candidate")"
+            [[ "$candidate" == "${image}:candidate-${GITHUB_SHA}-${GITHUB_RUN_ID}-"* ]]
+            candidate_digest="$(docker buildx imagetools inspect "$candidate" --format '{{json .Manifest}}' | jq -er '.digest')"
+            test "$candidate_digest" = "$digest"
+            tags="$(jq -nc --arg sha "${image}:sha-${GITHUB_SHA}" '[ $sha ]')"
+            if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/tags/* ]]; then
+              tags="$(jq -nc --arg sha "${image}:sha-${GITHUB_SHA}" --arg release "${image}:${GITHUB_REF_NAME}" '[ $sha, $release ]')"
+            fi
+            jq -n \
+              --arg service "$service" --arg repository "$image" --arg digest "$digest" \
+              --arg reference "${image}@${digest}" --argjson tags "$tags" --slurpfile manifest "$manifest" \
+              '{service: $service, repository: $repository, digest: $digest, reference: $reference,
+                tags: $tags,
+                platforms: [$manifest[0].manifests[] |
+                  select(.platform.os == "linux" and (.platform.architecture == "amd64" or .platform.architecture == "arm64")) |
+                  {os: .platform.os, architecture: .platform.architecture, digest: .digest}] | sort_by(.architecture)}' \
+              > "$RUNNER_TEMP/release-services/${service}.json"
+          done
+          release_tag=null
+          if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/tags/* ]]; then
+            release_tag="$(jq -nc --arg value "$GITHUB_REF_NAME" '$value')"
+          fi
+          jq -s \
+            --arg repository "$GITHUB_REPOSITORY" --arg commit "$GITHUB_SHA" --arg ref "$GITHUB_REF" \
+            --arg event "$GITHUB_EVENT_NAME" --argjson runId "$GITHUB_RUN_ID" \
+            --argjson releaseTag "$release_tag" \
+            '{schemaVersion: 1,
+              source: {repository: $repository, commit: $commit, ref: $ref, event: $event, runId: $runId},
+              releaseTag: $releaseTag,
+              images: (map({key: .service, value: del(.service)}) | from_entries)}' \
+            "$RUNNER_TEMP/release-services/web.json" \
+            "$RUNNER_TEMP/release-services/api.json" \
+            "$RUNNER_TEMP/release-services/worker.json" \
+            > "$RUNNER_TEMP/release-images.json"
+          node scripts/validate-deployment-config.mjs \
+            --release-manifest "$RUNNER_TEMP/release-images.json" \
+            --env-file "$RUNNER_TEMP/release-images.env"
+          promote_immutable() {
+            local target="$1"
+            local source="$2"
+            local expected="$3"
+            if docker buildx imagetools inspect "$target" >/dev/null 2>&1; then
+              local existing
+              existing="$(docker buildx imagetools inspect "$target" --format '{{json .Manifest}}' | jq -er '.digest')"
+              test "$existing" = "$expected"
+            else
+              docker buildx imagetools create -t "$target" "$source"
+            fi
+            local resolved
+            resolved="$(docker buildx imagetools inspect "$target" --format '{{json .Manifest}}' | jq -er '.digest')"
+            test "$resolved" = "$expected"
+          }
+          # A complete set of immutable SHA tags exists before any human-facing release tag.
+          for service in web api worker; do
+            image="ghcr.io/listencodes/infinite-canvas-${service}"
+            digest="$(jq -er --arg service "$service" '.images[$service].digest' "$RUNNER_TEMP/release-images.json")"
+            sha_tag="${image}:sha-${GITHUB_SHA}"
+            promote_immutable "$sha_tag" "${image}@${digest}" "$digest"
+          done
+          if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/tags/* ]]; then
+            for service in web api worker; do
+              image="ghcr.io/listencodes/infinite-canvas-${service}"
+              digest="$(jq -er --arg service "$service" '.images[$service].digest' "$RUNNER_TEMP/release-images.json")"
+              release_tag="${image}:${GITHUB_REF_NAME}"
+              promote_immutable "$release_tag" "${image}@${digest}" "$digest"
+            done
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-images-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/release-images.json
+            ${{ runner.temp }}/release-images.env
+          if-no-files-found: error
+          retention-days: 90
+  publish-docs:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    needs: verify-and-promote-release-manifest
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/docs-docker-image.yml
+
+  publish-plugins:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    needs: publish-docs
+    permissions:
+      contents: write
+    uses: ./.github/workflows/publish-plugins.yml
+
+  publish-pages:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    needs: publish-plugins
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/github-pages.yml
+
+  finalize-release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    needs: publish-pages
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-images-${{ github.sha }}
+          path: ${{ runner.temp }}/release
+      - name: Publish immutable release evidence
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP/release"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            mkdir -p existing
+            for evidence in release-images.json release-images.env; do
+              if gh release download "$GITHUB_REF_NAME" --pattern "$evidence" --dir existing >/dev/null 2>&1; then
+                cmp --silent "$evidence" "existing/$evidence"
+              else
+                gh release upload "$GITHUB_REF_NAME" "$evidence"
+              fi
+            done
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              release-images.json release-images.env \
+              --verify-tag --generate-notes
+          fi

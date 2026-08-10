@@ -18,6 +18,23 @@
 - [Local Development](/docs/development/local-development)
 - [Canvas Data Structure](/docs/development/canvas-data-structure)
 - [How the Local Codex Connection Works](/docs/development/local-codex-canvas)
+- [Hatchet Architecture ADR](adr/0001-hatchet-service-architecture.md)
+- [Reliability and Billing ADR](adr/0002-reliability-billing-and-schema-resolutions.md)
+- [Local Data Export v1](implementation/local-data-export-v1.md)
+- [Generation Error Catalog](implementation/error-catalog.md)
+- [Capacity and Environment Baseline](implementation/capacity-and-environments.md)
+
+## Cloud Operations
+
+- [Deployment Runbook](operations/deployment.md)
+- [Configuration Reference](operations/configuration.md)
+- [Database Migrations](operations/database-migrations.md)
+- [Worker Upgrade and Drain](operations/upgrade-and-drain.md)
+- [Backup and Restore](operations/backup-restore.md)
+- [Rollback](operations/rollback.md)
+- [Administrator Guide](operations/admin-guide.md)
+- [Cloud User Guide](operations/cloud-user-guide.md)
+- [Release Acceptance](operations/release-acceptance.md)
 
 ## Business
 
@@ -37,5 +54,5 @@
 
 ## Notes
 
-- Canvas projects and My Assets are primarily stored in the browser. WebDAV can be configured for cross-device synchronization.
-- The AI API key is stored in the browser, which sends requests directly to OpenAI-compatible endpoints.
+- Legacy mode stores canvas projects, assets, and user-provided API keys in the browser.
+- Cloud mode stores projects, tasks, assets, permissions, and credits in the service; platform provider keys and Hatchet tokens remain server-side only.

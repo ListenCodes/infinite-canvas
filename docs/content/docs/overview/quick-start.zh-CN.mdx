@@ -5,11 +5,11 @@ description: 用最少步骤把无限画布跑起来
 
 # 快速开始
 
-如果你只是想先把项目跑起来，优先部署或启动 `web/` 前端。
+如果你只是想先把项目跑起来，优先部署或启动 `web/` 前端；这会使用兼容旧版本的本地模式。需要账号、服务端任务和跨设备资产时，再部署完整 Hatchet 云端模式。
 
 ## Vercel 部署
 
-在 Vercel 中导入仓库即可，根目录 `vercel.json` 会构建 `web/`。当前版本的 AI 请求由浏览器前台直连用户自己的 OpenAI 兼容地址，不需要额外配置服务端。
+在 Vercel 中导入仓库即可，根目录 `vercel.json` 会构建 `web/`。这种部署只启用本地模式：AI 请求由浏览器直连用户自己的 OpenAI 兼容地址，不需要应用服务端。
 
 ## 本地启动
 
@@ -44,5 +44,6 @@ docker run --rm -p 3000:3000 infinite-canvas
 
 ## 说明
 
-- 当前画布项目和“我的素材”主要保存在浏览器本地，WebDAV 同步需要用户自行配置。
-- AI API Key 保存在浏览器本地，并由前端直接请求 OpenAI 兼容接口。
+- 只启动 `web/` 时，画布项目、“我的素材”和 AI API Key 保存在浏览器本地，WebDAV 由用户自行配置。
+- 完整云端模式的本地、Hatchet Cloud 与 Hatchet OSS 部署入口分别位于 `infra/compose/local`、`infra/compose/cloud`、`infra/compose/oss`；请先阅读仓库的 `docs/operations/deployment.md`。
+- 云端模式的平台 API Key 和 Hatchet Token 只进入 API/Worker 服务端环境，不能写入 Vite 环境变量或浏览器配置。

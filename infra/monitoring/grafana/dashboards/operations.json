@@ -1,0 +1,28 @@
+{
+  "annotations": { "list": [] },
+  "editable": false,
+  "panels": [
+    { "type": "stat", "title": "Outbox pending", "targets": [{ "expr": "infinite_canvas_outbox_pending" }], "gridPos": { "h": 8, "w": 6, "x": 0, "y": 0 } },
+    { "type": "stat", "title": "Oldest outbox seconds", "targets": [{ "expr": "infinite_canvas_outbox_oldest_seconds" }], "gridPos": { "h": 8, "w": 6, "x": 6, "y": 0 } },
+    { "type": "stat", "title": "Unknown outcomes", "targets": [{ "expr": "infinite_canvas_outcome_unknown" }], "gridPos": { "h": 8, "w": 4, "x": 12, "y": 0 } },
+    { "type": "stat", "title": "Oldest unknown seconds", "targets": [{ "expr": "infinite_canvas_outcome_unknown_oldest_seconds" }], "gridPos": { "h": 8, "w": 4, "x": 16, "y": 0 } },
+    { "type": "stat", "title": "Worker healthy", "targets": [{ "expr": "hatchet_worker_status" }], "gridPos": { "h": 8, "w": 4, "x": 20, "y": 0 } },
+    { "type": "timeseries", "title": "API request rate", "targets": [{ "expr": "sum by (route, status_code) (rate(infinite_canvas_api_http_request_duration_seconds_count[5m]))" }], "gridPos": { "h": 10, "w": 12, "x": 0, "y": 8 } },
+    { "type": "timeseries", "title": "API p95 latency", "targets": [{ "expr": "histogram_quantile(0.95, sum by (le, route) (rate(infinite_canvas_api_http_request_duration_seconds_bucket[5m])))" }], "gridPos": { "h": 10, "w": 12, "x": 12, "y": 8 } },
+    { "type": "stat", "title": "Financial invariant violations", "targets": [{ "expr": "infinite_canvas_financial_invariant_violations" }], "gridPos": { "h": 8, "w": 6, "x": 0, "y": 18 } },
+    { "type": "stat", "title": "Oldest reservation seconds", "targets": [{ "expr": "infinite_canvas_credit_reservation_oldest_seconds" }], "gridPos": { "h": 8, "w": 6, "x": 6, "y": 18 } },
+    { "type": "stat", "title": "Oldest active attempt seconds", "targets": [{ "expr": "infinite_canvas_active_attempt_oldest_seconds" }], "gridPos": { "h": 8, "w": 6, "x": 12, "y": 18 } },
+    { "type": "stat", "title": "Unhealthy provider channels", "targets": [{ "expr": "infinite_canvas_provider_channels_unhealthy" }], "gridPos": { "h": 8, "w": 6, "x": 18, "y": 18 } },
+    { "type": "timeseries", "title": "Provider request rate by code", "targets": [{ "expr": "sum by (code) (rate(infinite_canvas_provider_requests_total[5m]))" }], "gridPos": { "h": 10, "w": 12, "x": 0, "y": 26 } },
+    { "type": "timeseries", "title": "Provider p95 latency", "targets": [{ "expr": "histogram_quantile(0.95, sum by (le) (rate(infinite_canvas_provider_request_duration_seconds_bucket[5m])))" }], "gridPos": { "h": 10, "w": 12, "x": 12, "y": 26 } },
+    { "type": "stat", "title": "Attempts beyond deadline", "targets": [{ "expr": "infinite_canvas_active_attempts_overdue" }], "gridPos": { "h": 8, "w": 6, "x": 0, "y": 36 } }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 41,
+  "tags": ["infinite-canvas", "operations"],
+  "templating": { "list": [] },
+  "time": { "from": "now-6h", "to": "now" },
+  "title": "Infinite Canvas Operations",
+  "uid": "infinite-canvas-operations",
+  "version": 1
+}

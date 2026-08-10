@@ -1,35 +1,36 @@
 name: Docs Docker image
 
 on:
-  push:
-    tags: ["v*"]
-  workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
   packages: write
 
 env:
-  IMAGE_NAME: ghcr.io/basketikun/infinite-canvas-docs
+  IMAGE_NAME: ghcr.io/listencodes/infinite-canvas-docs
 
 jobs:
+  release-gate:
+    uses: ./.github/workflows/release-gate.yml
+
   meta:
+    needs: release-gate
     runs-on: ubuntu-latest
     outputs:
       tags: ${{ steps.meta.outputs.tags }}
       labels: ${{ steps.meta.outputs.labels }}
     steps:
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=latest
             type=ref,event=tag
             type=sha,prefix=
 
   build:
-    needs: meta
+    needs: [release-gate, meta]
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -42,18 +43,18 @@ jobs:
             arch: arm64
             runner: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: ./docs/Dockerfile
@@ -70,7 +71,7 @@ jobs:
           digest="${{ steps.build.outputs.digest }}"
           touch "$RUNNER_TEMP/digests/${digest#sha256:}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: docs-digests-${{ matrix.arch }}
           path: ${{ runner.temp }}/digests/*
@@ -83,15 +84,15 @@ jobs:
       - build
     runs-on: ubuntu-latest
     steps:
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: ${{ runner.temp }}/digests
           pattern: docs-digests-*
@@ -99,19 +100,28 @@ jobs:
 
       - name: Create multi-arch manifest
         shell: bash
-        env:
-          TAGS: ${{ needs.meta.outputs.tags }}
         run: |
-          tag_args=()
-          while IFS= read -r tag; do
-            if [ -n "$tag" ]; then
-              tag_args+=("-t" "$tag")
-            fi
-          done <<< "$TAGS"
-
+          mapfile -t digest_files < <(find "$RUNNER_TEMP/digests" -type f -printf '%f\n' | sort)
+          test "${#digest_files[@]}" -eq 2
           digest_args=()
-          while IFS= read -r digest_file; do
+          for digest_file in "${digest_files[@]}"; do
+            [[ "$digest_file" =~ ^[a-f0-9]{64}$ ]]
             digest_args+=("${IMAGE_NAME}@sha256:${digest_file}")
-          done < <(find "$RUNNER_TEMP/digests" -type f -printf '%f\n' | sort)
-
-          docker buildx imagetools create "${tag_args[@]}" "${digest_args[@]}"
+          done
+          candidate="${IMAGE_NAME}:candidate-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker buildx imagetools create -t "$candidate" "${digest_args[@]}"
+          digest="$(docker buildx imagetools inspect "$candidate" --format '{{json .Manifest}}' | jq -er '.digest')"
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          promote_immutable() {
+            local target="$1"
+            if docker buildx imagetools inspect "$target" >/dev/null 2>&1; then
+              test "$(docker buildx imagetools inspect "$target" --format '{{json .Manifest}}' | jq -er '.digest')" = "$digest"
+            else
+              docker buildx imagetools create -t "$target" "${IMAGE_NAME}@${digest}"
+            fi
+            test "$(docker buildx imagetools inspect "$target" --format '{{json .Manifest}}' | jq -er '.digest')" = "$digest"
+          }
+          promote_immutable "${IMAGE_NAME}:sha-${GITHUB_SHA}"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            promote_immutable "${IMAGE_NAME}:${GITHUB_REF_NAME}"
+          fi

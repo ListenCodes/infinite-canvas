@@ -93,6 +93,27 @@ docker compose up -d
 
 如果默认的OpenAI接口调用方式与您的API不同，可自定义生图/视频脚本调用。
 
+### Hatchet 云端模式
+
+本仓库同时包含 Fastify API、PostgreSQL migrations、Supabase Auth/Storage
+集成和 Hatchet TypeScript Worker。云端模式的生产发布必须使用三服务固定
+digest、独立数据库运行角色和私有对象存储，不能把平台密钥放入 Web 配置。
+
+- [部署手册](docs/operations/deployment.md)
+- [配置参考](docs/operations/configuration.md)
+- [数据库迁移](docs/operations/database-migrations.md)
+- [Worker 升级与 drain](docs/operations/upgrade-and-drain.md)
+- [备份恢复](docs/operations/backup-restore.md)
+- [回滚](docs/operations/rollback.md)
+- [管理员手册](docs/operations/admin-guide.md)
+- [云端用户手册](docs/operations/cloud-user-guide.md)
+- [发布阻断验收](docs/operations/release-acceptance.md)
+
+`infra/compose/local`、`cloud` 和 `oss` 分别提供 Hatchet Lite、Hatchet Cloud
+和 Hatchet OSS 配置；`infra/compose/recovery` 提供源栈到空目标栈的联合恢复
+演练，入口为 `npm run recovery:drill`。示例环境文件只含占位符；真实凭据不得提交。旧浏览器
+直连模式仍用于兼容，生产云端切换必须完成发布验收表，不能仅凭本地构建上线。
+
 ## 效果展示
 
 <table width="100%">

@@ -8,7 +8,7 @@ description: Major features available in the current project
 ## Canvas projects
 
 - Create, rename, duplicate, delete, import, and export canvas projects.
-- Persist projects in the browser and optionally synchronize them with WebDAV.
+- Persist projects in the browser in local mode, or explicitly publish project snapshots to the service in Hatchet cloud mode.
 - Keep viewport, background, nodes, connections, and assistant sessions with each project.
 
 ## Infinite canvas
@@ -27,7 +27,10 @@ description: Major features available in the current project
 
 ## AI generation
 
-- Connect to user-provided OpenAI-compatible endpoints directly from the browser.
+- In local mode, connect to user-provided OpenAI-compatible endpoints directly from the browser.
+- In cloud mode, create durable image and video tasks through the Fastify API and Hatchet Worker without exposing platform credentials to the browser.
+- Model a three-image request as one batch with three independent jobs, retaining successful slots and retrying only failed slots.
+- Resume tasks after closing or refreshing the browser through durable snapshots and SSE events; uncertain paid submissions enter outcome reconciliation instead of being blindly retried.
 - Configure multiple channels, fetch or enter model names, and choose default text, image, and video models.
 - Support image count, aspect ratio, quality, transparent backgrounds, reasoning effort, and custom invocation scripts.
 - Support OpenAI-style video endpoints and Volcengine Ark generation tasks.
@@ -54,11 +57,12 @@ Canvas plugins can contribute node types, rendering, inspectors, serialization, 
 ## Configuration and synchronization
 
 - Export and import channel, model, generation, prompt-source, and WebDAV settings.
-- Store application data and API credentials locally in the browser.
+- Keep local-mode application data and user credentials in the browser.
 - Use WebDAV for optional cross-device synchronization.
+- When the cloud runtime is configured, sign in with Supabase Auth, publish projects without deleting the local source, and manage durable tasks and server-side assets.
 
 ## Current limitations
 
-- The project is frontend-first and does not provide built-in cloud accounts or cloud storage.
-- API keys remain in browser storage and requests are sent directly to configured providers.
-- Production Docker static-resource paths still require broader deployment verification.
+- A Web-only deployment remains local mode; projects, assets, and user API keys stay in the browser.
+- Cloud mode requires the API, Worker, PostgreSQL, Supabase Auth, private object storage, and Hatchet services described in the operations documentation.
+- Browser-side custom invocation scripts remain a local-mode feature and are never executed by the Worker.

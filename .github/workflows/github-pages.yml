@@ -1,9 +1,7 @@
 name: GitHub Pages
 
 on:
-  push:
-    tags: ["v*"]
-  workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -15,29 +13,42 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  release-gate:
+    uses: ./.github/workflows/release-gate.yml
+
   build:
+    needs: release-gate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.16.0
+          cache: npm
+
+      - name: Install service workspace
+        run: npm ci
+
+      - name: Build shared browser contracts
+        run: npm run build -w @infinite-canvas/contracts
 
       - name: Install dependencies
         working-directory: web
-        run: bun install
+        run: npm ci
 
       - name: Build
         working-directory: web
         env:
           VITE_BASE: /${{ github.event.repository.name }}/
-        run: bun run build
+        run: npm run build
 
       - name: Add SPA fallback
         run: cp web/dist/index.html web/dist/404.html
 
-      - uses: actions/configure-pages@v5
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         with:
           path: web/dist
 
@@ -49,4 +60,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4

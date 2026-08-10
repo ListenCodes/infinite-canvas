@@ -1,0 +1,124 @@
+name: infinite-canvas-cloud
+
+x-api-environment: &api-environment
+  NODE_ENV: production
+  HOST: 0.0.0.0
+  PORT: 3001
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  METRICS_BEARER_TOKEN: ${METRICS_BEARER_TOKEN:?required}
+  BUSINESS_DATABASE_URL: ${BUSINESS_DATABASE_URL_API:?required}
+  BUSINESS_DATABASE_LISTENER_URL: ${BUSINESS_DATABASE_LISTENER_URL:?direct-or-session-connection-required}
+  SUPABASE_URL: ${SUPABASE_URL:?required}
+  SUPABASE_JWT_AUDIENCE: ${SUPABASE_JWT_AUDIENCE:-authenticated}
+  SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:?required}
+  CREDENTIAL_MASTER_KEY: ${CREDENTIAL_MASTER_KEY:?required}
+  STORAGE_BUCKET: ${S3_BUCKET:-infinite-canvas-assets}
+  CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:?required}
+  TRUST_PROXY: "true"
+
+x-worker-environment: &worker-environment
+  NODE_ENV: production
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  BUSINESS_DATABASE_URL: ${BUSINESS_DATABASE_URL_WORKER:?required}
+  SUPABASE_URL: ${SUPABASE_URL:?required}
+  SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:?required}
+  HATCHET_MODE: cloud
+  HATCHET_CLIENT_TOKEN: ${HATCHET_CLIENT_TOKEN:?required}
+  HATCHET_NAMESPACE: ${HATCHET_NAMESPACE:-infinite-canvas}
+  HATCHET_WORKER_SLOTS: ${HATCHET_WORKER_SLOTS:-20}
+  HATCHET_DURABLE_SLOTS: ${HATCHET_DURABLE_SLOTS:-100}
+  WORKER_HEALTH_PORT: 8733
+  OUTBOX_DISPATCHER_ENABLED: ${OUTBOX_DISPATCHER_ENABLED:-true}
+  UNKNOWN_RECONCILER_ENABLED: ${UNKNOWN_RECONCILER_ENABLED:-true}
+  CREDENTIAL_MASTER_KEY: ${CREDENTIAL_MASTER_KEY:?required}
+  S3_REGION: ${S3_REGION:?required}
+  S3_ENDPOINT: ${S3_ENDPOINT:?required}
+  S3_BUCKET: ${S3_BUCKET:?required}
+  S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?required}
+  S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?required}
+  S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-false}
+
+services:
+  web:
+    image: ${WEB_IMAGE:?immutable-digest-required}
+    restart: unless-stopped
+    ports: ["${WEB_BIND:-127.0.0.1:3000}:3000"]
+    environment:
+      CLOUD_BACKEND_ENABLED: ${CLOUD_BACKEND_ENABLED:-true}
+      API_BASE_URL: ${API_BASE_URL:?required}
+      SUPABASE_URL: ${SUPABASE_URL:?required}
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:?public-key-required}
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    networks: [frontend]
+
+  api:
+    image: ${API_IMAGE:?immutable-digest-required}
+    restart: unless-stopped
+    ports: ["${API_BIND:-127.0.0.1:3001}:3001"]
+    environment: *api-environment
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=1g"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    networks: [frontend, backend]
+
+  worker:
+    image: ${WORKER_IMAGE:?immutable-digest-required}
+    restart: unless-stopped
+    environment: *worker-environment
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=2g"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    stop_grace_period: 50m
+    networks: [backend]
+
+  recovery-audit:
+    profiles: ["recovery"]
+    image: ${WORKER_IMAGE:?immutable-digest-required}
+    command: ["node", "apps/worker/dist/recovery-audit.js"]
+    environment:
+      BUSINESS_DATABASE_URL: ${BUSINESS_DATABASE_URL_RECOVERY_AUDIT:?required}
+      S3_REGION: ${S3_REGION:?required}
+      S3_ENDPOINT: ${S3_ENDPOINT:?required}
+      S3_BUCKET: ${S3_BUCKET:?required}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?required}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?required}
+      S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-false}
+      RECOVERY_AUDIT_INCLUDE_IDENTIFIERS: ${RECOVERY_AUDIT_INCLUDE_IDENTIFIERS:-false}
+      RECOVERY_AUDIT_OBJECT_CONCURRENCY: ${RECOVERY_AUDIT_OBJECT_CONCURRENCY:-4}
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    networks: [backend]
+
+  database-migrate:
+    image: ${API_IMAGE:?immutable-digest-required}
+    profiles: ["tools"]
+    command: ["node", "packages/db/dist/migrate.js"]
+    environment:
+      BUSINESS_DATABASE_MIGRATION_URL: ${BUSINESS_DATABASE_MIGRATION_URL:?migration-owner-direct-url-required}
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    networks: [backend]
+
+  database-provision-roles:
+    image: ${API_IMAGE:?immutable-digest-required}
+    profiles: ["tools"]
+    command: ["node", "packages/db/dist/provision-runtime-roles.js"]
+    environment:
+      BUSINESS_DATABASE_PROVISION_URL: ${BUSINESS_DATABASE_PROVISION_URL:?role-provisioner-direct-url-required}
+      BUSINESS_DATABASE_OBJECT_OWNER_ROLE: ${BUSINESS_DATABASE_OBJECT_OWNER_ROLE:?required}
+      BUSINESS_DATABASE_API_PASSWORD: ${BUSINESS_DATABASE_API_PASSWORD:?required}
+      BUSINESS_DATABASE_WORKER_PASSWORD: ${BUSINESS_DATABASE_WORKER_PASSWORD:?required}
+      BUSINESS_DATABASE_RECOVERY_AUDIT_PASSWORD: ${BUSINESS_DATABASE_RECOVERY_AUDIT_PASSWORD:?required}
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    networks: [backend]
+
+networks:
+  frontend: {}
+  backend: {}

@@ -1,0 +1,60 @@
+# Database Migration Runbook
+
+Migrations are ordered across `packages/db/migrations/drizzle` and
+`packages/db/migrations/custom` by the append-only
+`packages/db/migrations/order.txt`. `app_schema_migrations` stores a SHA-256
+checksum for every applied file; changing an applied migration is a release
+blocker.
+
+## Rules
+
+- Add forward migrations. Never edit a migration that reached any shared database.
+- Append every generated/custom SQL file to `order.txt`. Never insert or reorder a
+  line after release. The runner rejects missing, unlisted, unknown, checksum-drifted,
+  and non-prefix histories before it applies new SQL.
+- Use expand/contract: add nullable columns/functions/policies first, deploy
+  compatible code, backfill, then enforce constraints in a later release.
+- Keep migration owner and runtime roles separate. API and Worker must be non-owner,
+  non-`BYPASSRLS` logins.
+- Test RLS with real runtime logins, including forged GUC values and cross-tenant
+  reads/writes.
+- Back up the database and record the latest event sequence and migration checksum
+  before a production migration.
+
+## Candidate procedure
+
+```bash
+npm ci
+npm run db:generate
+npm run typecheck
+npm test
+TEST_POSTGRES_ADMIN_URL=postgresql://... npm run test:postgres
+BUSINESS_DATABASE_PROVISION_URL=postgresql://... \
+BUSINESS_DATABASE_OBJECT_OWNER_ROLE=migration_owner npm run db:provision-roles
+BUSINESS_DATABASE_MIGRATION_URL=postgresql://... npm run db:migrate
+```
+
+`npm run db:generate` must report no unexpected schema diff after a committed
+custom migration. A generated SQL file is intentionally rejected until it is
+reviewed and appended to `order.txt`. Run migrations against an empty database and
+an upgraded copy of the previous release. Confirm `app_schema_migrations`
+checksums, composite foreign keys, RLS flags, triggers, and runtime grants.
+`profiles` and `workspace_members` intentionally use RLS without `FORCE`: their
+SECURITY DEFINER authorization helpers are owned by the non-BYPASS object owner.
+Runtime startup rejects table owners and `BYPASSRLS` logins; every other business
+table is forced through RLS.
+
+## Rollback policy
+
+`npm run db:rollback` is destructive and is only suitable for disposable initial
+environments. Production rollback normally means application rollback while the
+expanded schema stays in place. A destructive down migration requires a restored
+backup in an isolated database, explicit data-loss approval, and reconciliation of
+wallet, reservation, event, and object state before traffic resumes.
+
+The Hatchet backend first appears in the unreleased tree after `33c86858`; no
+upgrade from an older public business schema exists. Before the first release,
+discard any disposable preview database created from an earlier draft and perform
+a clean install. Once a release containing `order.txt` reaches a shared database,
+all later changes are forward-only and must be tested from a restored copy of that
+release.

@@ -4,9 +4,7 @@ name: Publish Official Plugins
 # 与 github-pages.yml 一致,在打版本 tag 时触发 —— 发版时 web 与官方插件一起发布。
 # 前端经 jsDelivr 从该分支远程拉取;构建产物不进 main、不进 git。
 on:
-  push:
-    tags: ["v*"]
-  workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: write
@@ -16,32 +14,35 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  release-gate:
+    uses: ./.github/workflows/release-gate.yml
+
   publish:
+    needs: release-gate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 22
+          node-version: 24.16.0
 
       - name: Install build dependencies
         working-directory: plugins/canvas/registry
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
 
       - name: Build official plugins
         working-directory: plugins/canvas/registry
         run: npm run build
 
-      - name: Publish to plugins-dist branch
-        working-directory: plugins/canvas/registry/dist
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish to plugins-dist branch without history rewrite
+        shell: bash
         run: |
-          git init -q
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git checkout -q -b plugins-dist
-          git add -A
-          git commit -q -m "publish official plugins @ ${GITHUB_SHA::7}"
-          git push -f "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" plugins-dist
+          git fetch origin plugins-dist
+          git worktree add "$RUNNER_TEMP/plugins-dist" origin/plugins-dist
+          rsync -a --delete --exclude .git/ plugins/canvas/registry/dist/ "$RUNNER_TEMP/plugins-dist/"
+          git -C "$RUNNER_TEMP/plugins-dist" config user.name "github-actions[bot]"
+          git -C "$RUNNER_TEMP/plugins-dist" config user.email "github-actions[bot]@users.noreply.github.com"
+          git -C "$RUNNER_TEMP/plugins-dist" add -A
+          git -C "$RUNNER_TEMP/plugins-dist" diff --cached --quiet || git -C "$RUNNER_TEMP/plugins-dist" commit -m "publish official plugins @ ${GITHUB_SHA::7}"
+          git -C "$RUNNER_TEMP/plugins-dist" push origin HEAD:plugins-dist

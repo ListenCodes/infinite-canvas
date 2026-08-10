@@ -1,0 +1,136 @@
+name: Release gate
+
+on:
+  workflow_call:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.16.0
+          cache: npm
+      - name: Verify release tag matches VERSION
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: test "$GITHUB_REF_NAME" = "$(tr -d '\r\n' < VERSION)"
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npm run verify:recovery-boundary
+      - run: npm audit --omit=dev --audit-level=high
+      - name: Install Web dependencies
+        working-directory: web
+        run: npm ci
+      - name: Verify Web
+        working-directory: web
+        env:
+          VITE_HATCHET_CLIENT_TOKEN: release-gate-hatchet-secret-0002
+          VITE_SUPABASE_SERVICE_ROLE_KEY: release-gate-service-secret-0001
+          VITE_CREDENTIAL_MASTER_KEY: release-gate-credential-secret-0003
+        run: |
+          npm run typecheck
+          npm run test:media-adapters
+          npm run test:canvas-generation
+          npm run test:cloud-recovery
+          npm run build
+          npm audit --omit=dev --audit-level=high
+      - name: Verify browser secret boundary
+        env:
+          SECRET_SCAN_CANARIES: release-gate-service-secret-0001,release-gate-hatchet-secret-0002,release-gate-credential-secret-0003
+        run: node scripts/verify-web-secret-boundary.mjs web/dist
+
+  postgres-integration:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:17.10-bookworm@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: infinite_canvas_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d infinite_canvas_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.16.0
+          cache: npm
+      - run: npm ci
+      - name: Run real PostgreSQL security and topology tests
+        env:
+          TEST_POSTGRES_ADMIN_URL: postgresql://postgres:postgres@127.0.0.1:5432/infinite_canvas_test
+        run: npm run test:postgres
+
+  deployment-config:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.16.0
+          cache: npm
+      - run: npm ci
+      - run: node scripts/validate-deployment-config.mjs
+      - run: npm run test:deployment-config
+      - name: Build deployable service images
+        run: |
+          docker build -t infinite-canvas-web:gate -f Dockerfile .
+          docker build -t infinite-canvas-api:gate -f apps/api/Dockerfile .
+          docker build -t infinite-canvas-worker:gate -f apps/worker/Dockerfile .
+      - name: Verify service images run as non-root
+        shell: bash
+        run: |
+          for image in infinite-canvas-web:gate infinite-canvas-api:gate infinite-canvas-worker:gate; do
+            configured_user="$(docker image inspect --format '{{.Config.User}}' "$image")"
+            test -n "$configured_user"
+            test "$configured_user" != "0"
+            test "$configured_user" != "root"
+            test "$(docker run --rm --entrypoint id "$image" -u)" != "0"
+          done
+      - name: Verify runtime browser secret boundary
+        env:
+          SECRET_SCAN_CANARIES: release-gate-service-secret-0001,release-gate-hatchet-secret-0002,release-gate-credential-secret-0003
+        run: |
+          mkdir -p "$RUNNER_TEMP/runtime-config"
+          docker run --rm --entrypoint sh \
+            -e CLOUD_BACKEND_ENABLED=true \
+            -e API_BASE_URL=https://canvas.example.com/api \
+            -e SUPABASE_URL=https://example.supabase.co \
+            -e SUPABASE_ANON_KEY=sb_publishable_example \
+            -e SUPABASE_SERVICE_ROLE_KEY=release-gate-service-secret-0001 \
+            -e HATCHET_CLIENT_TOKEN=release-gate-hatchet-secret-0002 \
+            -e CREDENTIAL_MASTER_KEY=release-gate-credential-secret-0003 \
+            infinite-canvas-web:gate \
+            -c '/docker-entrypoint.d/40-runtime-config.sh >/dev/null && cat /usr/share/nginx/html/config.js' \
+            > "$RUNNER_TEMP/runtime-config/config.js"
+          node scripts/verify-web-secret-boundary.mjs "$RUNNER_TEMP/runtime-config"
+      - name: Parse Compose configurations
+        shell: bash
+        run: |
+          docker compose --env-file infra/compose/local/.env.example -f infra/compose/local/compose.yaml --profile application --profile tools --profile recovery config --quiet
+          docker compose --env-file infra/compose/cloud/.env.example -f infra/compose/cloud/compose.yaml --profile tools --profile recovery config --quiet
+          docker compose --env-file infra/compose/oss/.env.example -f infra/compose/oss/compose.yaml --profile application --profile tools --profile recovery config --quiet
+      - name: Run isolated combined recovery drill
+        run: npm run recovery:drill -- --evidence-dir "$RUNNER_TEMP/recovery-evidence"
+      - name: Preserve redacted recovery evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: combined-recovery-${{ github.sha }}
+          path: ${{ runner.temp }}/recovery-evidence/combined-restore.json
+          if-no-files-found: error
+          retention-days: 14

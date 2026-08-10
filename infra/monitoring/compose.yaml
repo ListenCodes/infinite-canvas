@@ -1,0 +1,46 @@
+name: infinite-canvas-monitoring
+
+services:
+  prometheus:
+    image: prom/prometheus:v3.7.3@sha256:49214755b6153f90a597adcbff0252cc61069f8ab69ce8411285cd4a560e8038
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+    ports: ["${PROMETHEUS_BIND:-127.0.0.1:9090}:9090"]
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./alerts.yml:/etc/prometheus/alerts.yml:ro
+      - ${API_METRICS_BEARER_TOKEN_FILE:?required}:/run/secrets/api_metrics_bearer_token:ro
+      - prometheus-data:/prometheus
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    networks: [application]
+
+  grafana:
+    image: grafana/grafana:12.3.1@sha256:2175aaa91c96733d86d31cf270d5310b278654b03f5718c59de12a865380a31f
+    restart: unless-stopped
+    depends_on: [prometheus]
+    ports: ["${GRAFANA_BIND:-127.0.0.1:3002}:3000"]
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?required}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    networks: [application]
+
+volumes:
+  prometheus-data: {}
+  grafana-data: {}
+
+networks:
+  application:
+    external: true
+    name: ${APPLICATION_BACKEND_NETWORK:?required}

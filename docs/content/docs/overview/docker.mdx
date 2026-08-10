@@ -5,7 +5,7 @@ description: Deploy Infinite Canvas with Docker Compose
 
 # Docker Deployment
 
-## Use the published image
+## Start local mode
 
 ```bash
 git clone git@github.com:basketikun/infinite-canvas.git
@@ -37,7 +37,13 @@ cd docs
 docker compose -f docker-compose.local.yml up -d --build
 ```
 
-The main application container only runs Next.js. Canvases, My Assets, generation history, and API keys are stored in the browser by default, while prompt repositories are fetched directly by the frontend. No persistent data volume is required for this data.
+The root Compose file builds the Vite frontend and serves it with non-root Nginx. In this local mode, canvases, My Assets, generation history, and user API keys stay in the browser, while prompt repositories are fetched directly by the frontend.
+
+## Complete cloud mode
+
+Use `infra/compose/local` for the repeatable Hatchet Lite development stack, `infra/compose/cloud` for Hatchet Cloud with managed Supabase, or `infra/compose/oss` for the pinned Hatchet OSS control plane. Cloud mode requires immutable digests for the separate `infinite-canvas-web`, `infinite-canvas-api`, and `infinite-canvas-worker` images, plus Auth, the business database, private object storage, and Hatchet configuration.
+
+The business PostgreSQL database owns projects, tasks, permissions, and credit facts; private object storage owns assets; Hatchet owns execution facts. Platform credentials stay in API/Worker server environments. Follow `docs/operations/` for migration, backup, rollback, and v1/v2 Worker drain procedures, and never deploy an example `replace-me` digest.
 
 ## Optional analytics
 

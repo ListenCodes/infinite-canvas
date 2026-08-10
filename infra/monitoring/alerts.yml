@@ -1,0 +1,81 @@
+groups:
+  - name: infinite-canvas-release-blockers
+    rules:
+      - alert: InfiniteCanvasApiUnavailable
+        expr: up{job="infinite-canvas-api"} == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: Infinite Canvas API metrics endpoint is unavailable
+      - alert: InfiniteCanvasWorkerUnavailable
+        expr: up{job="infinite-canvas-worker"} == 0 or hatchet_worker_status == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: Infinite Canvas Worker is unavailable or unhealthy
+      - alert: InfiniteCanvasOutboxStalled
+        expr: infinite_canvas_outbox_oldest_seconds > 120
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: Oldest pending Outbox event is more than two minutes old
+      - alert: InfiniteCanvasOutboxBacklog
+        expr: infinite_canvas_outbox_pending > 100
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: Transactional Outbox backlog is elevated
+      - alert: InfiniteCanvasUnknownOutcomes
+        expr: infinite_canvas_outcome_unknown > 0
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: Paid provider submissions require outcome reconciliation
+      - alert: InfiniteCanvasUnknownOutcomeDeadlineRisk
+        expr: infinite_canvas_outcome_unknown_oldest_seconds > 82800
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: An unresolved outcome is within one hour of its mandatory release deadline
+      - alert: InfiniteCanvasFinancialInvariantViolation
+        expr: infinite_canvas_financial_invariant_violations > 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: Wallet and credit reservation facts are inconsistent
+      - alert: InfiniteCanvasLongLivedReservation
+        expr: infinite_canvas_credit_reservation_oldest_seconds > 3600
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: A credit reservation has remained frozen for more than one hour
+      - alert: InfiniteCanvasBusinessDeadlineExceeded
+        expr: infinite_canvas_active_attempts_overdue > 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: One or more active attempts exceeded their business deadline plus five minutes
+      - alert: InfiniteCanvasActiveAttemptStalled
+        expr: infinite_canvas_active_attempt_oldest_seconds > 7200
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: An accepted or materializing attempt has not progressed for two hours
+      - alert: InfiniteCanvasProviderChannelUnhealthy
+        expr: infinite_canvas_provider_channels_unhealthy > 0
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: One or more active provider channels are not healthy
+      - alert: InfiniteCanvasProviderFailureRate
+        expr: sum(rate(infinite_canvas_provider_requests_total{code=~"5..|timeout|network_error"}[5m])) / clamp_min(sum(rate(infinite_canvas_provider_requests_total[5m])), 0.001) > 0.2
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: Provider 5xx and transport failures exceed 20 percent
+      - alert: InfiniteCanvasApiServerErrors
+        expr: sum(rate(infinite_canvas_api_http_request_duration_seconds_count{status_code=~"5.."}[5m])) > 0.2
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: Infinite Canvas API server error rate is elevated
