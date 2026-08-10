@@ -868,13 +868,6 @@ test("ten concurrent idempotent creates and failed-slot retries preserve exact c
         ),
         assertCode("workspace_write_forbidden"),
       );
-      await sql.begin(async (transaction) => {
-        await transaction`select set_config('app.service_role', 'on', true)`;
-        await transaction`
-          update workspaces set status = 'active'
-          where id in (${secondWorkspaceId}, ${providerCreateWorkspaceId})
-        `;
-      });
       await assert.rejects(
         assetService.createUploadIntent(
           userId,
@@ -883,6 +876,13 @@ test("ten concurrent idempotent creates and failed-slot retries preserve exact c
         ),
         assertCode("workspace_write_forbidden"),
       );
+      await sql.begin(async (transaction) => {
+        await transaction`select set_config('app.service_role', 'on', true)`;
+        await transaction`
+          update workspaces set status = 'active'
+          where id in (${secondWorkspaceId}, ${providerCreateWorkspaceId})
+        `;
+      });
       await assert.rejects(
         service.createBatch(
           userId,
