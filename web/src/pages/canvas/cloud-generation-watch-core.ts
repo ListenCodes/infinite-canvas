@@ -53,6 +53,7 @@ export class ActiveGenerationWatchRegistry {
     #active = new Map<string, { signal: AbortSignal; token: symbol }>();
 
     acquire(key: string, signal: AbortSignal): (() => void) | null {
+        if (signal.aborted) return null;
         const current = this.#active.get(key);
         if (current && !current.signal.aborted) return null;
         const token = Symbol(key);

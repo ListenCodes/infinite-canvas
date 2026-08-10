@@ -95,9 +95,18 @@ export async function resumeCloudImageBatchesCore(options: {
                 recoverable = true;
                 break;
             }
-            if (image.cloud.serverStatus === "succeeded" && (!image.content || !image.storageKey || !(await options.hasBlob(image.storageKey)))) {
-                recoverable = true;
-                break;
+            if (image.cloud.serverStatus === "succeeded") {
+                const storageKey = image.storageKey;
+                if (!image.content || !storageKey) {
+                    recoverable = true;
+                    break;
+                }
+                const hasBlob = await options.hasBlob(storageKey);
+                if (options.signal.aborted) return;
+                if (!hasBlob) {
+                    recoverable = true;
+                    break;
+                }
             }
         }
         if (batchId && recoverable) void options.watchBatch(batchId, node.id, options.signal).catch(() => undefined);
@@ -141,8 +150,16 @@ export async function resumeCloudVideoBatchesCore(options: {
             }
         }
         if (!batchId || !serverStatus) continue;
-        const recoverable =
-            Boolean(node.metadata?.cloudJob?.retryIdempotencyKey) || !terminal.has(serverStatus) || (serverStatus === "succeeded" && (!node.metadata?.content || !node.metadata.storageKey || !(await options.hasBlob(node.metadata.storageKey))));
+        let missingMaterializedVideo = false;
+        if (serverStatus === "succeeded") {
+            const storageKey = node.metadata?.storageKey;
+            missingMaterializedVideo = !node.metadata?.content || !storageKey;
+            if (!missingMaterializedVideo && storageKey) {
+                missingMaterializedVideo = !(await options.hasBlob(storageKey));
+                if (options.signal.aborted) return;
+            }
+        }
+        const recoverable = Boolean(node.metadata?.cloudJob?.retryIdempotencyKey) || !terminal.has(serverStatus) || missingMaterializedVideo;
         if (recoverable) void options.watchBatch(batchId, node.id, options.signal).catch(() => undefined);
     }
 }

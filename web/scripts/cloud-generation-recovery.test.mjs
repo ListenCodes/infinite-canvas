@@ -165,6 +165,9 @@ test("wake channel performs the five second cursor sweep and aborts immediately"
 
 test("an aborted watcher can be replaced without the stale owner releasing the new one", () => {
     const registry = new ActiveGenerationWatchRegistry();
+    const alreadyAborted = new AbortController();
+    alreadyAborted.abort();
+    assert.equal(registry.acquire("batch-aborted", alreadyAborted.signal), null);
     const firstController = new AbortController();
     const releaseFirst = registry.acquire("batch-1", firstController.signal);
     assert.ok(releaseFirst);
@@ -290,6 +293,57 @@ test("real image and video recovery drivers watch active and local batches witho
         ["video", "00000000-0000-4000-8000-000000000304", "node-active"],
         ["video", "00000000-0000-4000-8000-000000000303", "video-local"],
     ]);
+});
+
+test("video recovery does not start a watcher after cancellation during local media lookup", async () => {
+    const controller = new AbortController();
+    let finishLookup;
+    let watchCalls = 0;
+    const recovery = resumeCloudVideoBatchesCore({
+        nodes: [{ id: "video-local", type: "video", metadata: { cloudBatchId: "00000000-0000-4000-8000-000000000305", cloudJob: { serverStatus: "succeeded" }, content: "blob:video", storageKey: "video:stored" } }],
+        videoNodeType: "video",
+        signal: controller.signal,
+        authoritativeJobs: [],
+        updateJob: () => undefined,
+        watchBatch: async () => {
+            watchCalls += 1;
+        },
+        resolveBatch: async () => {
+            throw new Error("resolve must not run");
+        },
+        hasBlob: async () => new Promise((resolve) => {
+            finishLookup = resolve;
+        }),
+    });
+    controller.abort(new DOMException("project changed", "AbortError"));
+    finishLookup(false);
+    await recovery;
+    assert.equal(watchCalls, 0);
+});
+
+test("image recovery does not start a watcher after cancellation during local media lookup", async () => {
+    const controller = new AbortController();
+    let finishLookup;
+    let watchCalls = 0;
+    const recovery = resumeCloudImageBatchesCore({
+        nodes: [{ id: "image-local", metadata: { cloudBatchId: "00000000-0000-4000-8000-000000000306", images: [{ content: "blob:image", storageKey: "image:stored", cloud: { serverStatus: "succeeded" } }] } }],
+        signal: controller.signal,
+        authoritativeJobs: [],
+        updateJobs: () => undefined,
+        watchBatch: async () => {
+            watchCalls += 1;
+        },
+        resolveBatch: async () => {
+            throw new Error("resolve must not run");
+        },
+        hasBlob: async () => new Promise((resolve) => {
+            finishLookup = resolve;
+        }),
+    });
+    controller.abort(new DOMException("project changed", "AbortError"));
+    finishLookup(false);
+    await recovery;
+    assert.equal(watchCalls, 0);
 });
 
 test("a locally failed succeeded image retries materialization without a paid attempt", () => {
