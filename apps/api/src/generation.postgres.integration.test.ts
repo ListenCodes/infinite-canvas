@@ -45,10 +45,14 @@ test("ten concurrent idempotent creates and failed-slot retries preserve exact c
         insert into profiles (
           user_id, display_name, cloud_projects_enabled, cloud_image_enabled,
           cloud_video_enabled, cloud_credits_enabled
-        ) values (${userId}, 'Concurrency User', true, true, true, true)
+        ) values
+          (${userId}, 'Concurrency User', true, true, true, true),
+          (${unauthorizedUserId}, 'Cross-tenant User', true, false, false, false)
         on conflict (user_id) do update
-          set cloud_projects_enabled = true, cloud_image_enabled = true,
-              cloud_video_enabled = true, cloud_credits_enabled = true
+          set cloud_projects_enabled = excluded.cloud_projects_enabled,
+              cloud_image_enabled = excluded.cloud_image_enabled,
+              cloud_video_enabled = excluded.cloud_video_enabled,
+              cloud_credits_enabled = excluded.cloud_credits_enabled
       `;
       await transaction`insert into workspaces (id, owner_user_id, name) values (${workspaceId}, ${userId}, 'Concurrency Workspace') on conflict do nothing`;
       await transaction`insert into workspace_members (workspace_id, user_id, role) values (${workspaceId}, ${userId}, 'owner') on conflict do nothing`;
