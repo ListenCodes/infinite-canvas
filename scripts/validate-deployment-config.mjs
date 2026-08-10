@@ -568,7 +568,6 @@ for (const relativePath of releaseManifestArguments) {
     const expectedTags = [];
     if (tagPush) {
       expectedTags.push(`${repositoryName}:sha-${source?.commit ?? ""}`);
-      expectedTags.push(`${repositoryName}:${manifest.releaseTag}`);
     }
     if (
       JSON.stringify([...(image.tags ?? [])].sort()) !==

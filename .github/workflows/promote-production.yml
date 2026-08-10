@@ -1,0 +1,97 @@
+name: Promote production release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Draft release tag to promote
+        required: true
+        type: string
+      acceptance_sha256:
+        description: Reviewed SHA-256 of production-acceptance.json
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: production-promotion-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    environment: production-acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: refs/tags/${{ inputs.release_tag }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.16.0
+          cache: npm
+      - run: npm ci
+      - name: Download and validate reviewed production evidence
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          ACCEPTANCE_SHA256: ${{ inputs.acceptance_sha256 }}
+        shell: bash
+        run: |
+          test "$(tr -d '\r\n' < VERSION)" = "$RELEASE_TAG"
+          gh api "repos/$GITHUB_REPOSITORY/environments/production-acceptance" > "$RUNNER_TEMP/production-environment.json"
+          jq -e '.protection_rules | any(.type == "required_reviewers" and (.reviewers | length > 0))' \
+            "$RUNNER_TEMP/production-environment.json" >/dev/null
+          test "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" = true
+          mkdir -p "$RUNNER_TEMP/production-promotion"
+          gh release download "$RELEASE_TAG" \
+            --pattern release-images.json \
+            --pattern release-images.env \
+            --pattern combined-restore.json \
+            --pattern production-acceptance.json \
+            --dir "$RUNNER_TEMP/production-promotion"
+          candidate_commit="$(git rev-parse HEAD)"
+          node scripts/validate-deployment-config.mjs \
+            --release-manifest "$RUNNER_TEMP/production-promotion/release-images.json" \
+            --env-file "$RUNNER_TEMP/production-promotion/release-images.env"
+          node scripts/validate-production-acceptance.mjs \
+            --release-manifest "$RUNNER_TEMP/production-promotion/release-images.json" \
+            --acceptance-manifest "$RUNNER_TEMP/production-promotion/production-acceptance.json" \
+            --expected-tag "$RELEASE_TAG" \
+            --expected-source "$candidate_commit" \
+            --expected-acceptance-sha256 "$ACCEPTANCE_SHA256"
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Promote accepted service images and publish the Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        shell: bash
+        run: |
+          manifest="$RUNNER_TEMP/production-promotion/release-images.json"
+          promote_immutable() {
+            local target="$1"
+            local source="$2"
+            local expected="$3"
+            if docker buildx imagetools inspect "$target" >/dev/null 2>&1; then
+              existing="$(docker buildx imagetools inspect "$target" --format '{{json .Manifest}}' | jq -er '.digest')"
+              test "$existing" = "$expected"
+            else
+              docker buildx imagetools create -t "$target" "$source"
+            fi
+            resolved="$(docker buildx imagetools inspect "$target" --format '{{json .Manifest}}' | jq -er '.digest')"
+            test "$resolved" = "$expected"
+          }
+          for service in web api worker; do
+            image="ghcr.io/listencodes/infinite-canvas-${service}"
+            digest="$(jq -er --arg service "$service" '.images[$service].digest' "$manifest")"
+            promote_immutable "${image}:${RELEASE_TAG}" "${image}@${digest}" "$digest"
+          done
+          gh release edit "$RELEASE_TAG" --draft=false --latest

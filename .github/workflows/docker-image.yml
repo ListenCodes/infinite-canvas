@@ -191,7 +191,7 @@ jobs:
             test "$candidate_digest" = "$digest"
             tags='[]'
             if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/tags/* ]]; then
-              tags="$(jq -nc --arg sha "${image}:sha-${GITHUB_SHA}" --arg release "${image}:${GITHUB_REF_NAME}" '[ $sha, $release ]')"
+              tags="$(jq -nc --arg sha "${image}:sha-${GITHUB_SHA}" '[ $sha ]')"
             fi
             jq -n \
               --arg service "$service" --arg repository "$image" --arg digest "$digest" \
@@ -293,14 +293,12 @@ jobs:
             test "$resolved" = "$expected"
           }
           if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/tags/* ]]; then
-            # The draft Release persists the complete set before any immutable tag is written.
+            # The draft Release persists the complete set before its candidate SHA tag is written.
             for service in web api worker; do
               image="ghcr.io/listencodes/infinite-canvas-${service}"
               digest="$(jq -er --arg service "$service" '.images[$service].digest' "$RUNNER_TEMP/release-images.json")"
               sha_tag="${image}:sha-${GITHUB_SHA}"
               promote_immutable "$sha_tag" "${image}@${digest}" "$digest"
-              release_tag="${image}:${GITHUB_REF_NAME}"
-              promote_immutable "$release_tag" "${image}@${digest}" "$digest"
             done
           fi
       - name: Stage flat release artifact
@@ -341,7 +339,7 @@ jobs:
       id-token: write
     uses: ./.github/workflows/github-pages.yml
 
-  finalize-release:
+  finalize-release-candidate:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     needs: publish-pages
     runs-on: ubuntu-latest
@@ -352,7 +350,7 @@ jobs:
         with:
           name: release-images-${{ github.sha }}
           path: ${{ runner.temp }}/release
-      - name: Publish immutable release evidence
+      - name: Retain immutable candidate evidence in the draft Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
@@ -376,9 +374,8 @@ jobs:
             else
               gh release upload "$GITHUB_REF_NAME" combined-restore.json
             fi
-            gh release edit "$GITHUB_REF_NAME" --draft=false --latest
           else
             gh release create "$GITHUB_REF_NAME" \
               release-images.json release-images.env combined-restore.json \
-              --verify-tag --generate-notes
+              --draft --verify-tag --generate-notes
           fi

@@ -29,10 +29,22 @@ npm run db:generate
 npm run typecheck
 npm test
 TEST_POSTGRES_ADMIN_URL=postgresql://... npm run test:postgres
+BUSINESS_DATABASE_MIGRATION_URL=postgresql://... npm run db:migrate
 BUSINESS_DATABASE_PROVISION_URL=postgresql://... \
 BUSINESS_DATABASE_OBJECT_OWNER_ROLE=migration_owner npm run db:provision-roles
-BUSINESS_DATABASE_MIGRATION_URL=postgresql://... npm run db:migrate
 ```
+
+For an empty database, the external role provisioner must first create the ordinary
+`NOSUPERUSER NOBYPASSRLS` object-owner login and make it the database owner. Run the
+schema migration with that object-owner connection, then run `db:provision-roles`
+with the separate role-provisioner connection to create/repair runtime logins,
+current grants, and default privileges. Provisioning cannot run before the schema
+exists because it audits and grants existing `public` tables and `app` functions.
+
+For an existing shared database, apply the append-only migration with the existing
+object owner and rerun `db:provision-roles` afterward. Existing default privileges
+cover objects created during the migration; the final provision pass repairs and
+audits current-object grants. Never run either command with an API or Worker URL.
 
 `npm run db:generate` must report no unexpected schema diff after a committed
 custom migration. A generated SQL file is intentionally rejected until it is

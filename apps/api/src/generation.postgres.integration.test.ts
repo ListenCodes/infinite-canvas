@@ -5,6 +5,7 @@ import { test } from "node:test";
 import postgres from "postgres";
 import { generationWorkflowInputSchema } from "@infinite-canvas/contracts";
 
+import { assertApiDatabaseTopology } from "./database-topology.js";
 import { EventBroker, EventService } from "./events.js";
 import { AssetService } from "./services/assets.js";
 import { GenerationService } from "./services/generation.js";
@@ -23,6 +24,7 @@ function runtimeUrl(input: string): string {
 test("ten concurrent idempotent creates and failed-slot retries preserve exact cardinality", { skip: !adminUrl }, async () => {
   assert.ok(adminUrl);
   const sql = postgres(runtimeUrl(adminUrl), { max: 12, prepare: false });
+  const unsafeListener = postgres(adminUrl, { max: 1, prepare: false });
   const userId = "00000000-0000-4000-8000-00000000c001";
   const workspaceId = "00000000-0000-4000-8000-00000000c101";
   const projectId = "00000000-0000-4000-8000-00000000c201";
@@ -39,6 +41,10 @@ test("ten concurrent idempotent creates and failed-slot retries preserve exact c
   const providerCreateSlots = ["provider-create-slot-1", "provider-create-slot-2", "provider-create-slot-3"];
 
   try {
+    await assert.rejects(
+      assertApiDatabaseTopology(sql, unsafeListener),
+      /API event listener database role .* is unsafe/,
+    );
     await sql.begin(async (transaction) => {
       await transaction`select set_config('app.service_role', 'on', true)`;
       await transaction`
@@ -991,6 +997,7 @@ test("ten concurrent idempotent creates and failed-slot retries preserve exact c
       await brokerB.close();
     }
   } finally {
+    await unsafeListener.end();
     await sql.end();
   }
 });

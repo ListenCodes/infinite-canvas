@@ -1,10 +1,11 @@
 import postgres from "postgres";
 import { createClient } from "@supabase/supabase-js";
 
-import { assertRuntimeDatabaseRole, createDatabase } from "@infinite-canvas/db";
+import { createDatabase } from "@infinite-canvas/db";
 
 import { SupabaseAuthenticator } from "./auth.js";
 import { loadConfig } from "./config.js";
+import { assertApiDatabaseTopology } from "./database-topology.js";
 import { EventBroker, EventService } from "./events.js";
 import { createId } from "./ids.js";
 import { buildServer } from "./server.js";
@@ -16,12 +17,20 @@ import { AdminService } from "./services/admin.js";
 
 const config = loadConfig();
 const database = createDatabase(config.BUSINESS_DATABASE_URL, { applicationName: "infinite-canvas-api" });
-await assertRuntimeDatabaseRole(database.client, "API");
 const listener = postgres(config.BUSINESS_DATABASE_LISTENER_URL, {
   max: 1,
   prepare: false,
   connection: { application_name: "infinite-canvas-api-events" },
 });
+try {
+  await assertApiDatabaseTopology(database.client, listener);
+} catch (error) {
+  await Promise.allSettled([
+    listener.end({ timeout: 1 }),
+    database.client.end({ timeout: 1 }),
+  ]);
+  throw error;
+}
 const eventBroker = new EventBroker(listener);
 await eventBroker.start();
 const supabase = createClient(config.SUPABASE_URL, config.SUPABASE_SERVICE_ROLE_KEY, {

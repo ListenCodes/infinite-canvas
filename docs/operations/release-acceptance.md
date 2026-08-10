@@ -43,6 +43,34 @@ repeatable engineering evidence, but must be labelled. They do not replace provi
 billing, managed Supabase, Hatchet Cloud outage, public TLS/SSE, alert delivery, or
 full restore exercises. Any failed or missing row blocks production promotion.
 
+## Production promotion evidence
+
+The tag workflow leaves a draft Release and immutable `sha-<commit>` image tags. It
+does not publish version tags or a latest Release. After the table above passes in
+the selected production-equivalent Staging environment, create
+`production-acceptance.json` with exactly these top-level fields:
+
+- `schemaVersion: 1`;
+- `candidate`: `releaseTag`, `sourceSha`, SHA-256 of the exact
+  `release-images.json`, and the exact Web/API/Worker digest references;
+- `environment: "production-candidate"` and a UTC `recordedAt`;
+- `rows`: exactly rows 1-15 in table order.
+
+Every row records `id`, the stable scenario name used by
+`scripts/validate-production-acceptance.mjs`, `result: "passed"`, `evidenceTier`, a
+stable HTTPS evidence URI without credentials/query/fragment, UTC observation time,
+operator, independent reviewer, procedure name, and an empty `limitations` array.
+Rows 1-14 require `staging-production-equivalent`; row 15 requires
+`managed-production-restore`. A mock/local result or a row with a limitation remains
+engineering evidence and cannot be placed in this promotion file.
+
+Keep the evidence file free of secrets, signed URLs, and user content. Upload it once
+to the draft Release without `--clobber`, have the production reviewer record its
+SHA-256, then dispatch `.github/workflows/promote-production.yml` with the tag and
+reviewed digest. The protected `production-acceptance` Environment must require the
+appropriate production reviewers. The workflow checks out the tag and validates all
+bindings before creating version image tags or publishing the Release.
+
 ## Current repeatable local evidence
 
 The commit containing this section has the following local evidence on 2026-08-10:
@@ -102,13 +130,15 @@ The commit containing this section has the following local evidence on 2026-08-1
   `outcome_unknown`; provider-task reconciliation uses the same database capacity
   gate. Real PostgreSQL contention and provider load evidence remain required.
 - Tag publication first persists one three-image release set in a draft GitHub
-  Release, then promotes immutable tags from that set. The combined recovery evidence
+  Release, then promotes only immutable SHA candidate tags from that set. The combined recovery evidence
   is regenerated against the exact API/Worker digests, records the manifest checksum
   and all three image references, and requires the same real terminal Hatchet run,
   task identity, terminal timestamp, and input/output hashes before and after the
   control-plane restore. Promotion always executes a fresh drill; workflow reruns
   append attempt-qualified evidence and never treat an existing Release JSON asset
-  as proof of execution. Evidence is retained with the published Release. Cloud and OSS
+  as proof of execution. Version tags and Release publication occur only after the
+  protected production-acceptance workflow validates all 15 external rows. Evidence
+  is retained with the published Release. Cloud and OSS
   include validated old/new Worker drain overlays whose dispatcher and
   reconciler flags must each have exactly one owner outside the intentional zero-owner
   handoff interval.

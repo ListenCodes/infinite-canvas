@@ -54,15 +54,20 @@ recovery exercises remain production evidence gates.
 Run tools from the same immutable API image that will be deployed:
 
 ```bash
-docker compose --env-file /secure/path/runtime.env -f infra/compose/cloud/compose.yaml run --rm database-provision-roles
 docker compose --env-file /secure/path/runtime.env -f infra/compose/cloud/compose.yaml run --rm database-migrate
+docker compose --env-file /secure/path/runtime.env -f infra/compose/cloud/compose.yaml run --rm database-provision-roles
 ```
 
-The migration connection must be direct and owned by the object-owner role. Role
-provisioning uses the separate `BUSINESS_DATABASE_PROVISION_URL` and names the
-owner with `BUSINESS_DATABASE_OBJECT_OWNER_ROLE`; do not expose that connection
-to API or Worker. The API and Worker perform a startup assertion that rejects
-owner or `BYPASSRLS` roles. Never fall back from
+For an empty database, first use the external provisioner to create the ordinary
+`NOSUPERUSER NOBYPASSRLS` object-owner login and assign database ownership. The
+migration connection must then be direct and use that object owner. After the
+schema exists, role provisioning uses the separate
+`BUSINESS_DATABASE_PROVISION_URL` and names the owner with
+`BUSINESS_DATABASE_OBJECT_OWNER_ROLE`; do not expose either privileged connection
+to API or Worker. For an existing database, migrate with the established object
+owner and rerun provisioning afterward to audit and repair current grants. The API,
+its LISTEN connection, and the Worker perform startup assertions that reject owner
+or `BYPASSRLS` roles; both API connections must use the same runtime login. Never fall back from
 `BUSINESS_DATABASE_MIGRATION_URL` to a runtime URL.
 
 ## Start order
@@ -84,22 +89,33 @@ owner or `BYPASSRLS` roles. Never fall back from
    mutable run-attempt number so an unchanged release can be rerun byte-for-byte.
 
 For a tag build, the workflow creates a draft GitHub Release containing the complete
-three-image manifest before it writes any immutable SHA or version tag. A failed
-promotion rerun downloads and reuses that persisted set even if a rebuild would
-produce different bytes. Operators and deployment automation must treat only a
-published Release with both manifest files as ready; candidate tags and a draft
+three-image manifest before it writes any immutable `sha-<commit>` candidate tag. A
+failed candidate rerun downloads and reuses that persisted set even if a rebuild
+would produce different bytes. The tag workflow does not create version image tags
+and does not publish or mark the Release as latest. Operators and deployment
+automation must treat only a Release published by the protected production promotion
+workflow as ready; candidate tags, candidate Pages/docs artifacts, and a draft
 Release are not a deployment signal.
 Manual `workflow_dispatch` runs build and validate candidate manifests but publish
 neither `sha-<commit>` nor release tags. Only a tag-push run may create immutable
-deployment tags after its draft Release has persisted the complete three-image set.
+SHA candidate tags after its draft Release has persisted the complete three-image set.
 The combined-restore drill is then rerun against the exact API and Worker digest
 references from that manifest. Its redacted evidence records the manifest SHA-256
 and all three image references, plus one real terminal Hatchet run observed before
 and after restoration through both REST and gRPC. Every promotion attempt executes
 a fresh drill. The first report keeps the canonical `combined-restore.json` name;
 a later successful rerun appends an attempt-qualified report instead of replacing
-prior evidence. Reports are retained with the published Release instead of relying
-on the short-lived Actions artifact alone.
+prior evidence. Reports are retained with the draft and eventual published Release
+instead of relying on the short-lived Actions artifact alone.
+
+After all 15 rows in `docs/operations/release-acceptance.md` pass, upload the reviewed
+`production-acceptance.json` to the draft Release without clobbering an existing
+asset. Record its SHA-256 separately, then dispatch `promote-production.yml` with the
+release tag and that digest. The job is protected by the `production-acceptance`
+GitHub Environment, revalidates the candidate and evidence binding, creates the
+three version image tags without overwriting a conflicting digest, and only then
+publishes the GitHub Release as latest. The Environment and required reviewers are
+external repository settings and must be confirmed before first use.
 
 For OSS, Compose waits for `hatchet-engine:/ready` and
 `hatchet-dashboard:/api/ready` before starting the Worker. The dashboard embeds

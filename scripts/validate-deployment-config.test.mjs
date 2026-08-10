@@ -45,6 +45,17 @@ function releaseManifest() {
   };
 }
 
+function taggedReleaseManifest() {
+  const manifest = releaseManifest();
+  manifest.source.ref = "refs/tags/v0.15.1";
+  manifest.source.event = "push";
+  manifest.releaseTag = "v0.15.1";
+  for (const image of Object.values(manifest.images)) {
+    image.tags = [`${image.repository}:sha-${commit}`];
+  }
+  return manifest;
+}
+
 async function validate(manifest, mutateEnvironment = (value) => value) {
   const directory = await mkdtemp(
     join(tmpdir(), "infinite-canvas-release-manifest-"),
@@ -117,6 +128,15 @@ function parseEnvironment(content) {
 test("release manifest binds three multi-architecture images to the source commit", async () => {
   const result = await validate(releaseManifest());
   assert.equal(result.status, 0, result.stderr);
+});
+
+test("tag candidates publish only source-SHA image tags before production acceptance", async () => {
+  const candidate = taggedReleaseManifest();
+  assert.equal((await validate(candidate)).status, 0);
+  candidate.images.api.tags.push(`${candidate.images.api.repository}:${candidate.releaseTag}`);
+  const rejected = await validate(candidate);
+  assert.equal(rejected.status, 1);
+  assert.match(rejected.stderr, /tags do not match/);
 });
 
 test("release manifest rejects mutable workflow attempt metadata", async () => {
@@ -380,12 +400,12 @@ test("leaf release workflows cannot be dispatched independently", async () => {
   }
 });
 
-test("release evidence is finalized after every leaf publisher without clobber", async () => {
+test("release candidate evidence is retained after every leaf publisher without publishing", async () => {
   const content = await readFile(
     resolve(repository, ".github/workflows/docker-image.yml"),
     "utf8",
   );
-  const finalizer = content.slice(content.indexOf("  finalize-release:"));
+  const finalizer = content.slice(content.indexOf("  finalize-release-candidate:"));
   assert.match(finalizer, /^\s*needs:\s*publish-pages\s*$/m);
   assert.match(finalizer, /cmp --silent/);
   assert.doesNotMatch(finalizer, /--clobber/);
@@ -393,10 +413,8 @@ test("release evidence is finalized after every leaf publisher without clobber",
     finalizer,
     /combined-restore-run-\$\{GITHUB_RUN_ID\}-attempt-\$\{GITHUB_RUN_ATTEMPT\}\.json/,
   );
-  assert.match(
-    finalizer,
-    /gh release edit "\$GITHUB_REF_NAME" --draft=false --latest/,
-  );
+  assert.match(finalizer, /--draft --verify-tag --generate-notes/);
+  assert.doesNotMatch(finalizer, /--draft=false|--latest/);
 });
 
 test("tag promotion reuses one release set but always regenerates recovery evidence", async () => {
@@ -425,12 +443,10 @@ test("tag promotion reuses one release set but always regenerates recovery evide
   const shaPromotion = promote.run.indexOf(
     'sha_tag="${image}:sha-${GITHUB_SHA}"',
   );
-  const releasePromotion = promote.run.indexOf(
-    'release_tag="${image}:${GITHUB_REF_NAME}"',
-  );
   assert.ok(createBoundary >= 0 && reuseBoundary >= 0);
   assert.ok(shaPromotion > createBoundary && shaPromotion > reuseBoundary);
-  assert.ok(releasePromotion > shaPromotion);
+  assert.doesNotMatch(promote.run, /release_tag="\$\{image\}|promote_immutable "\$release_tag"/);
+  assert.match(promote.run, /--arg sha "\$\{image\}:sha-\$\{GITHUB_SHA\}" '\[ \$sha \]'/);
   assert.match(promote.run, /--draft --verify-tag --generate-notes/);
   assert.match(
     promote.run,
@@ -467,6 +483,45 @@ test("tag promotion reuses one release set but always regenerates recovery evide
   );
   assert.equal(artifact?.with?.overwrite, true);
   assert.equal(artifact?.with?.path, "${{ runner.temp }}/release-artifact/*");
+});
+
+test("production promotion is protected and validates all reviewed evidence before publishing", async () => {
+  const workflow = parse(
+    await readFile(resolve(repository, ".github/workflows/promote-production.yml"), "utf8"),
+  );
+  const job = workflow.jobs?.promote;
+  assert.equal(job?.environment, "production-acceptance");
+  assert.equal(job?.["timeout-minutes"], 30);
+  const steps = job?.steps;
+  assert.ok(Array.isArray(steps));
+  const checkout = steps.find(({ uses }) => String(uses).startsWith("actions/checkout@"));
+  assert.equal(checkout?.with?.ref, "refs/tags/${{ inputs.release_tag }}");
+  const validateStep = steps.find(({ name }) => name === "Download and validate reviewed production evidence");
+  const validation = validateStep?.run ?? "";
+  assert.match(validation, /production-acceptance\.json/);
+  assert.match(validation, /validate-production-acceptance\.mjs/);
+  assert.match(validation, /--expected-acceptance-sha256 "\$ACCEPTANCE_SHA256"/);
+  assert.match(validation, /environments\/production-acceptance/);
+  assert.match(validation, /required_reviewers/);
+  assert.match(validation, /gh release view "\$RELEASE_TAG" --json isDraft/);
+  const promoteStep = steps.find(({ name }) => name === "Promote accepted service images and publish the Release");
+  const promotion = promoteStep?.run ?? "";
+  const imagePromotion = promotion.indexOf('promote_immutable "${image}:${RELEASE_TAG}"');
+  const releasePublication = promotion.indexOf('gh release edit "$RELEASE_TAG" --draft=false --latest');
+  assert.ok(imagePromotion >= 0 && releasePublication > imagePromotion);
+});
+
+test("empty database runbooks migrate before provisioning runtime grants", async () => {
+  for (const name of ["database-migrations.md", "deployment.md"]) {
+    const content = await readFile(resolve(repository, "docs/operations", name), "utf8");
+    const migrate = content.indexOf("database-migrate") >= 0
+      ? content.indexOf("database-migrate")
+      : content.indexOf("npm run db:migrate");
+    const provision = content.indexOf("database-provision-roles") >= 0
+      ? content.indexOf("database-provision-roles")
+      : content.indexOf("npm run db:provision-roles");
+    assert.ok(migrate >= 0 && provision > migrate, name);
+  }
 });
 
 test("documentation image bases are immutable and recorded in the image lock", async () => {
