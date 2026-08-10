@@ -108,12 +108,13 @@ export async function watchCloudVideoBatch(batchId: string, nodeId: string, setN
         signal: stream.signal,
         initialCursor: cursor,
         loadSnapshot: (eventSignal) => getCloudGenerationBatch(batchId, eventSignal),
-        subscribe: ({ projectId, cursor: eventCursor, signal: eventSignal, onEventSequence }) => subscribeCloudEvents({
-            projectId,
-            cursor: eventCursor,
-            signal: eventSignal,
-            onEvent: (event) => onEventSequence(event.sequence),
-        }),
+        subscribe: ({ projectId, cursor: eventCursor, signal: eventSignal, onEventSequence }) =>
+            subscribeCloudEvents({
+                projectId,
+                cursor: eventCursor,
+                signal: eventSignal,
+                onEvent: (event) => onEventSequence(event.sequence),
+            }),
         onEvent: () => wake.notify(),
     });
     try {
@@ -161,10 +162,11 @@ export async function runCloudVideoGeneration(options: {
     setNodes: SetNodes;
     signal: AbortSignal;
 }) {
-    const models = await listCloudModels("video");
+    const models = await listCloudModels("video", options.signal);
     const model = models[0];
     if (!model) throw new Error("No active cloud video model is configured");
-    const referenceAssetIds = await Promise.all(options.references.map(uploadCloudImageReference));
+    const referenceAssetIds = await Promise.all(options.references.map((reference) => uploadCloudImageReference(reference, options.signal)));
+    if (options.signal.aborted) throw options.signal.reason;
     const request = createGenerationBatchRequestSchema.parse({
         projectId: options.remoteProjectId,
         kind: "video",
@@ -176,12 +178,14 @@ export async function runCloudVideoGeneration(options: {
     });
     let created;
     try {
-        created = await createCloudGenerationBatch(request, options.idempotencyKey);
+        created = await createCloudGenerationBatch(request, options.idempotencyKey, options.signal);
     } catch {
+        if (options.signal.aborted) throw options.signal.reason;
         try {
-            created = await createCloudGenerationBatch(request, options.idempotencyKey);
+            created = await createCloudGenerationBatch(request, options.idempotencyKey, options.signal);
         } catch {
-            created = await resolveCloudGenerationBatch(options.remoteProjectId, options.idempotencyKey);
+            if (options.signal.aborted) throw options.signal.reason;
+            created = await resolveCloudGenerationBatch(options.remoteProjectId, options.idempotencyKey, options.signal);
         }
     }
     const job = created.jobs[0];
@@ -189,13 +193,7 @@ export async function runCloudVideoGeneration(options: {
     return watchCloudVideoBatch(created.batchId, options.nodeId, options.setNodes, options.signal);
 }
 
-export async function resumeCloudVideoBatches(
-    nodes: readonly CanvasNodeData[],
-    setNodes: SetNodes,
-    signal: AbortSignal,
-    remoteProjectId?: string,
-    authoritativeJobs: readonly ActiveGenerationJobProjection[] = [],
-): Promise<void> {
+export async function resumeCloudVideoBatches(nodes: readonly CanvasNodeData[], setNodes: SetNodes, signal: AbortSignal, remoteProjectId?: string, authoritativeJobs: readonly ActiveGenerationJobProjection[] = []): Promise<void> {
     return resumeCloudVideoBatchesCore({
         nodes,
         videoNodeType: CanvasNodeType.Video,

@@ -2,17 +2,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { createCloudMigrationArchive } from "@/lib/canvas/cloud-migration-export";
 import { createCloudImport, getCloudImport } from "@/services/api/cloud-imports";
-import {
-    loadCloudMigrationRecord,
-    loadLegacyCloudMigrationRecord,
-    saveCloudMigrationRecord,
-    type CloudMigrationRecord,
-    type LegacyCloudMigrationRecord,
-} from "@/services/cloud-migration";
+import { loadCloudMigrationRecord, loadLegacyCloudMigrationRecord, saveCloudMigrationRecord, type CloudMigrationRecord, type LegacyCloudMigrationRecord } from "@/services/cloud-migration";
 import {
     cloudMigrationBelongsTo,
+    cloudMigrationLoadRetryDelay,
     cloudMigrationRecordKey,
+    ensureCloudMigrationCanStart,
     isCloudMigrationBusy,
+    isCloudMigrationIdentityLoaded,
     localProjectsChangedSinceExport,
     updateCloudMigrationBusyCounts,
     type CloudMigrationBusyCounts,
@@ -22,10 +19,7 @@ import { useAssetStore } from "@/stores/use-asset-store";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { useUserStore } from "@/stores/use-user-store";
 
-function applyResponse(
-    record: CloudMigrationRecord,
-    response: Awaited<ReturnType<typeof createCloudImport>>,
-): CloudMigrationRecord {
+function applyResponse(record: CloudMigrationRecord, response: Awaited<ReturnType<typeof createCloudImport>>): CloudMigrationRecord {
     return {
         ...record,
         importId: response.importId,
@@ -40,6 +34,11 @@ function applyResponse(
     };
 }
 
+function currentSessionMatches(identity: CloudMigrationIdentity): boolean {
+    const session = useUserStore.getState();
+    return session.authenticated && session.user?.id === identity.userId && session.workspaceId === identity.workspaceId;
+}
+
 export function useCloudMigration() {
     const authenticated = useUserStore((state) => state.authenticated);
     const userId = useUserStore((state) => state.user?.id);
@@ -48,9 +47,13 @@ export function useCloudMigration() {
     const projectsHydrated = useCanvasStore((state) => state.hydrated);
     const assetsHydrated = useAssetStore((state) => state.hydrated);
     const [record, setRecord] = useState<CloudMigrationRecord | null>(null);
+    const [loadedIdentityKey, setLoadedIdentityKey] = useState<string | null>(null);
+    const [recordLoadFailed, setRecordLoadFailed] = useState(false);
+    const [recordLoadGeneration, setRecordLoadGeneration] = useState(0);
     const [legacyRecord, setLegacyRecord] = useState<LegacyCloudMigrationRecord | null>(null);
     const [busyCounts, setBusyCounts] = useState<CloudMigrationBusyCounts>({});
     const activeRequests = useRef(new Set<string>());
+    const recordLoadFailures = useRef(new Map<string, number>());
 
     const changeBusy = useCallback((identity: CloudMigrationIdentity, delta: 1 | -1) => {
         setBusyCounts((counts) => updateCloudMigrationBusyCounts(counts, identity, delta));
@@ -68,17 +71,15 @@ export function useCloudMigration() {
             if (!userId || !workspaceId || !cloudMigrationBelongsTo(current, { userId, workspaceId })) {
                 throw new Error("Cloud migration does not belong to the current account and workspace");
             }
+            if (!currentSessionMatches(current)) {
+                throw new Error("Cloud migration identity changed before the request started");
+            }
             const requestKey = cloudMigrationRecordKey(current);
             if (activeRequests.current.has(requestKey)) return;
             activeRequests.current.add(requestKey);
             changeBusy(current, 1);
             try {
-                const response =
-                    current.status === "prepared" || current.status === "failed"
-                        ? await createCloudImport(current.archive)
-                        : current.importId
-                          ? await getCloudImport(current.importId)
-                          : await createCloudImport(current.archive);
+                const response = current.status === "prepared" || current.status === "failed" ? await createCloudImport(current.archive) : current.importId ? await getCloudImport(current.importId) : await createCloudImport(current.archive);
                 await persist(applyResponse(current, response));
             } catch (error) {
                 await persist({
@@ -110,15 +111,44 @@ export function useCloudMigration() {
 
     useEffect(() => {
         let disposed = false;
+        let retryTimer: number | undefined;
         setRecord(null);
+        setLoadedIdentityKey(null);
+        setRecordLoadFailed(false);
         if (!authenticated || !userId || !workspaceId) return;
-        void loadCloudMigrationRecord({ userId, workspaceId }).then((value) => {
-            if (!disposed) setRecord(value);
-        });
+        const identity = { userId, workspaceId };
+        const identityKey = cloudMigrationRecordKey(identity);
+        void loadCloudMigrationRecord(identity)
+            .then((value) => {
+                if (!disposed) {
+                    recordLoadFailures.current.delete(identityKey);
+                    setRecord(value);
+                    setLoadedIdentityKey(identityKey);
+                }
+            })
+            .catch(() => {
+                if (disposed) return;
+                const failureCount = (recordLoadFailures.current.get(identityKey) ?? 0) + 1;
+                recordLoadFailures.current.set(identityKey, failureCount);
+                const retryDelay = cloudMigrationLoadRetryDelay(failureCount);
+                if (retryDelay === null) {
+                    setRecordLoadFailed(true);
+                    return;
+                }
+                retryTimer = window.setTimeout(() => setRecordLoadGeneration((generation) => generation + 1), retryDelay);
+            });
         return () => {
             disposed = true;
+            if (retryTimer !== undefined) window.clearTimeout(retryTimer);
         };
-    }, [authenticated, userId, workspaceId]);
+    }, [authenticated, recordLoadGeneration, userId, workspaceId]);
+
+    const retryRecordLoad = useCallback(() => {
+        if (!userId || !workspaceId) return;
+        recordLoadFailures.current.delete(cloudMigrationRecordKey({ userId, workspaceId }));
+        setRecordLoadFailed(false);
+        setRecordLoadGeneration((generation) => generation + 1);
+    }, [userId, workspaceId]);
 
     useEffect(() => {
         if (!authenticated || !enabled || !userId || !workspaceId || !record) return;
@@ -133,19 +163,24 @@ export function useCloudMigration() {
     }, [advance, authenticated, enabled, record, userId, workspaceId]);
 
     const start = useCallback(async () => {
-        if (!authenticated || !userId || !workspaceId || !enabled || !projectsHydrated || !assetsHydrated)
-            throw new Error("Cloud migration is not available");
-        if (record && record.status !== "failed") throw new Error("The current cloud migration must be resolved before starting another one");
+        if (!authenticated || !userId || !workspaceId || !enabled || !projectsHydrated || !assetsHydrated) throw new Error("Cloud migration is not available");
         const identity = { userId, workspaceId };
+        const startRequestKey = `${cloudMigrationRecordKey(identity)}:start`;
+        if (activeRequests.current.has(startRequestKey)) throw new Error("Cloud migration is already starting");
+        activeRequests.current.add(startRequestKey);
         changeBusy(identity, 1);
         try {
+            await ensureCloudMigrationCanStart({ identity, loadedIdentityKey, currentRecord: record, loadRecord: loadCloudMigrationRecord });
             const clientExportId = crypto.randomUUID();
             const projects = useCanvasStore.getState().projects;
-            const { archive, counts } = await createCloudMigrationArchive(
-                projects,
-                useAssetStore.getState().assets,
-                clientExportId,
-            );
+            const { archive, counts } = await createCloudMigrationArchive(projects, useAssetStore.getState().assets, clientExportId);
+            if (!currentSessionMatches(identity)) {
+                throw new Error("Cloud migration identity changed before the archive was saved");
+            }
+            await ensureCloudMigrationCanStart({ identity, loadedIdentityKey, currentRecord: record, loadRecord: loadCloudMigrationRecord });
+            if (!currentSessionMatches(identity)) {
+                throw new Error("Cloud migration identity changed while the migration record was checked");
+            }
             const prepared = await persist({
                 userId,
                 workspaceId,
@@ -158,9 +193,10 @@ export function useCloudMigration() {
             });
             await advance(prepared);
         } finally {
+            activeRequests.current.delete(startRequestKey);
             changeBusy(identity, -1);
         }
-    }, [advance, assetsHydrated, authenticated, changeBusy, enabled, persist, projectsHydrated, record, userId, workspaceId]);
+    }, [advance, assetsHydrated, authenticated, changeBusy, enabled, loadedIdentityKey, persist, projectsHydrated, record, userId, workspaceId]);
 
     const retry = useCallback(async () => {
         if (!record || record.status !== "failed" || !userId || !workspaceId) return;
@@ -174,9 +210,7 @@ export function useCloudMigration() {
         const identity = { userId, workspaceId };
         changeBusy(identity, 1);
         try {
-            const approvedProjectRevisions = Object.fromEntries(
-                useCanvasStore.getState().projects.map((project) => [project.id, project.updatedAt]),
-            );
+            const approvedProjectRevisions = Object.fromEntries(useCanvasStore.getState().projects.map((project) => [project.id, project.updatedAt]));
             await new Promise<void>((resolve, reject) => {
                 let settled = false;
                 const finish = (error?: unknown) => {
@@ -199,19 +233,21 @@ export function useCloudMigration() {
         }
     }, [changeBusy, persist, record, userId, workspaceId]);
 
-    const localChangesSinceExport = record
-        ? localProjectsChangedSinceExport(record.projectRevisions, useCanvasStore.getState().projects)
-        : false;
     const currentIdentity = userId && workspaceId ? { userId, workspaceId } : null;
+    const identityLoaded = isCloudMigrationIdentityLoaded(loadedIdentityKey, currentIdentity);
+    const visibleRecord = identityLoaded && currentIdentity && record && cloudMigrationBelongsTo(record, currentIdentity) ? record : null;
+    const localChangesSinceExport = visibleRecord ? localProjectsChangedSinceExport(visibleRecord.projectRevisions, useCanvasStore.getState().projects) : false;
 
     return {
-        record,
+        record: visibleRecord,
         legacyRecord,
+        recordLoadFailed,
         busy: isCloudMigrationBusy(busyCounts, currentIdentity),
-        available: authenticated && Boolean(userId) && Boolean(workspaceId) && enabled && projectsHydrated && assetsHydrated,
+        available: authenticated && Boolean(userId) && Boolean(workspaceId) && enabled && projectsHydrated && assetsHydrated && identityLoaded,
         localChangesSinceExport,
         start,
         retry,
+        retryRecordLoad,
         activate,
     };
 }

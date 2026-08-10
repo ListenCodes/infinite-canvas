@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { workspaceIdSchema, type CanvasDocument, type ProjectProjection } from "@infinite-canvas/contracts";
 
 import { CLOUD_BACKEND_CONFIGURED } from "@/constant/runtime-config";
@@ -6,7 +6,7 @@ import { CloudApiError } from "@/services/api/cloud-client";
 import { getCloudAssetUrl } from "@/services/api/cloud-assets";
 import { createCloudProject, listCloudProjects, updateCloudProject } from "@/services/api/cloud-projects";
 import { loadCloudMigrationRecord } from "@/services/cloud-migration";
-import { cloudMigrationActivationMatches, isCloudImportPublishedFor } from "@/services/cloud-migration-policy";
+import { cloudMigrationActivationMatches, cloudMigrationRecordKey, cloudProjectBindingMatchesIdentity, cloudProjectResponseMayUpdateBinding, isCloudImportPublishedFor, type CloudMigrationIdentity } from "@/services/cloud-migration-policy";
 import { uploadImage } from "@/services/image-storage";
 import { uploadMediaFile } from "@/services/file-storage";
 import { useCanvasStore, type CanvasProject } from "@/stores/canvas/use-canvas-store";
@@ -17,10 +17,12 @@ function withoutEphemeralUrls<T>(value: T): T {
     if (Array.isArray(value)) return value.map(withoutEphemeralUrls) as T;
     if (!value || typeof value !== "object") return value;
     const source = value as Record<string, unknown>;
-    return Object.fromEntries(Object.entries(source).map(([key, item]) => {
-        if (key === "content" && typeof item === "string" && (item.startsWith("blob:") || item.startsWith("data:"))) return [key, ""];
-        return [key, withoutEphemeralUrls(item)];
-    })) as T;
+    return Object.fromEntries(
+        Object.entries(source).map(([key, item]) => {
+            if (key === "content" && typeof item === "string" && (item.startsWith("blob:") || item.startsWith("data:"))) return [key, ""];
+            return [key, withoutEphemeralUrls(item)];
+        }),
+    ) as T;
 }
 
 export function projectDocument(project: CanvasProject): CanvasDocument {
@@ -32,7 +34,7 @@ function hasLocalMediaReference(value: unknown): boolean {
     if (!value || typeof value !== "object") return false;
     const record = value as Record<string, unknown>;
     if (typeof record.storageKey === "string" && record.storageKey.includes(":")) return true;
-    return Object.values(record).some((item) => Array.isArray(item) ? item.some(hasLocalMediaReference) : hasLocalMediaReference(item));
+    return Object.values(record).some((item) => (Array.isArray(item) ? item.some(hasLocalMediaReference) : hasLocalMediaReference(item)));
 }
 
 async function hydrateCloudAssets(value: unknown): Promise<unknown> {
@@ -74,7 +76,7 @@ async function hydrateCloudAssets(value: unknown): Promise<unknown> {
 }
 
 async function fromProjection(remote: ProjectProjection): Promise<CanvasProject | null> {
-    const source = await hydrateCloudAssets(remote.documentJson.document) as Partial<CanvasProject>;
+    const source = (await hydrateCloudAssets(remote.documentJson.document)) as Partial<CanvasProject>;
     if (!Array.isArray(source.nodes) || !Array.isArray(source.connections)) return null;
     return {
         id: remote.documentJson.localProjectId,
@@ -104,18 +106,10 @@ export function useCloudProjectsBootstrap(): void {
         const identity = { userId, workspaceId };
         const load = async (requestedExportId?: string, approvedProjectRevisions?: Readonly<Record<string, string>>) => {
             const migration = await loadCloudMigrationRecord(identity);
-            if (
-                requestedExportId !== undefined &&
-                (!migration || migration.status !== "published" || !cloudMigrationActivationMatches(migration, { ...identity, clientExportId: requestedExportId }))
-            ) {
+            if (requestedExportId !== undefined && (!migration || migration.status !== "published" || !cloudMigrationActivationMatches(migration, { ...identity, clientExportId: requestedExportId }))) {
                 throw new Error("Cloud migration activation no longer matches the published import");
             }
-            const mayReplaceImportedLocal = Boolean(
-                migration?.status === "published" &&
-                (requestedExportId === undefined
-                    ? migration.activatedAt
-                    : cloudMigrationActivationMatches(migration, { ...identity, clientExportId: requestedExportId })),
-            );
+            const mayReplaceImportedLocal = Boolean(migration?.status === "published" && (requestedExportId === undefined ? migration.activatedAt : cloudMigrationActivationMatches(migration, { ...identity, clientExportId: requestedExportId })));
             const projects = await listCloudProjects();
             if (disposed) {
                 if (requestedExportId !== undefined) throw new Error("Cloud migration activation was interrupted");
@@ -154,10 +148,15 @@ export function useCloudProjectsBootstrap(): void {
         const reload = (event: Event) => {
             if (!(event instanceof CustomEvent) || !isCloudImportPublishedFor(event.detail, identity)) return;
             const detail = event.detail as { clientExportId: string; approvedProjectRevisions?: Readonly<Record<string, string>>; complete?: (error?: unknown) => void };
-            void load(detail.clientExportId, detail.approvedProjectRevisions).then(() => detail.complete?.()).catch((error) => detail.complete?.(error));
+            void load(detail.clientExportId, detail.approvedProjectRevisions)
+                .then(() => detail.complete?.())
+                .catch((error) => detail.complete?.(error));
         };
         window.addEventListener("infinite-canvas:cloud-import-published", reload);
-        return () => { disposed = true; window.removeEventListener("infinite-canvas:cloud-import-published", reload); };
+        return () => {
+            disposed = true;
+            window.removeEventListener("infinite-canvas:cloud-import-published", reload);
+        };
     }, [authenticated, hydrated, projectsEnabled, userId, workspaceId]);
 }
 
@@ -169,11 +168,19 @@ export function useCloudProjectSync(localProjectId: string) {
     const project = useCanvasStore((state) => state.projects.find((item) => item.id === localProjectId));
     const queue = useRef<Promise<ProjectProjection | null>>(Promise.resolve(null));
     const lastDocument = useRef("");
+    const identity = useMemo<CloudMigrationIdentity | null>(() => (authenticated && userId && workspaceId ? { userId, workspaceId } : null), [authenticated, userId, workspaceId]);
+    const bindingMatchesIdentity = cloudProjectBindingMatchesIdentity(project?.cloud, identity);
+
+    const currentSessionMatches = useCallback(() => {
+        if (!identity) return false;
+        const session = useUserStore.getState();
+        return session.authenticated && session.user?.id === identity.userId && session.workspaceId === identity.workspaceId;
+    }, [identity]);
 
     const persist = useCallback(async (): Promise<ProjectProjection | null> => {
-        if (!CLOUD_BACKEND_CONFIGURED || !authenticated || !featureFlags.projects || !userId || !workspaceId) return null;
+        if (!CLOUD_BACKEND_CONFIGURED || !featureFlags.projects || !identity || !bindingMatchesIdentity || !currentSessionMatches()) return null;
         const current = useCanvasStore.getState().projects.find((item) => item.id === localProjectId);
-        if (!current || current.cloud?.conflictVersion) return null;
+        if (!current || current.cloud?.conflictVersion || !cloudProjectBindingMatchesIdentity(current.cloud, identity)) return null;
         const documentJson = projectDocument(current);
         const serialized = JSON.stringify({ title: current.title, documentJson });
         if (serialized === lastDocument.current && current.cloud) {
@@ -183,32 +190,40 @@ export function useCloudProjectSync(localProjectId: string) {
             if (!current.cloud && hasLocalMediaReference(current)) return null;
             let remote = current.cloud
                 ? await updateCloudProject(current.cloud.projectId, { title: current.title, documentJson, version: current.cloud.version })
-                : await createCloudProject(
-                      { title: current.title, documentJson, workspaceId: workspaceIdSchema.parse(workspaceId), clientProjectId: localProjectId },
-                      `project-create:${userId}:${localProjectId}`,
-                  );
-            if (
-                !current.cloud &&
-                (remote.title !== current.title || JSON.stringify(remote.documentJson) !== JSON.stringify(documentJson))
-            ) {
+                : await createCloudProject({ title: current.title, documentJson, workspaceId: workspaceIdSchema.parse(identity.workspaceId), clientProjectId: localProjectId }, `project-create:${identity.userId}:${localProjectId}`);
+            if (!current.cloud && (remote.title !== current.title || JSON.stringify(remote.documentJson) !== JSON.stringify(documentJson))) {
                 remote = await updateCloudProject(remote.id, {
                     title: current.title,
                     documentJson,
                     version: remote.version,
                 });
             }
+            const latest = useCanvasStore.getState().projects.find((item) => item.id === localProjectId);
+            if (
+                !currentSessionMatches() ||
+                !latest ||
+                !cloudProjectResponseMayUpdateBinding({
+                    identity,
+                    capturedBinding: current.cloud,
+                    latestBinding: latest.cloud,
+                    response: remote,
+                })
+            )
+                return null;
             lastDocument.current = serialized;
-            useCanvasStore.getState().setCloudBinding(localProjectId, { projectId: remote.id, version: remote.version, workspaceId: remote.workspaceId, userId });
+            useCanvasStore.getState().setCloudBinding(localProjectId, { projectId: remote.id, version: remote.version, workspaceId: remote.workspaceId, userId: identity.userId });
             return remote;
         } catch (error) {
             if (error instanceof CloudApiError && error.detail.code === "project_version_conflict") {
                 const currentVersion = Number(error.detail.details?.currentVersion || 0);
                 const binding = useCanvasStore.getState().projects.find((item) => item.id === localProjectId)?.cloud;
-                if (binding) useCanvasStore.getState().setCloudBinding(localProjectId, { ...binding, conflictVersion: currentVersion || binding.version });
+                if (currentSessionMatches() && binding && cloudProjectBindingMatchesIdentity(binding, identity)) {
+                    useCanvasStore.getState().setCloudBinding(localProjectId, { ...binding, conflictVersion: currentVersion || binding.version });
+                }
             }
             throw error;
         }
-    }, [authenticated, featureFlags.projects, localProjectId, userId, workspaceId]);
+    }, [bindingMatchesIdentity, currentSessionMatches, featureFlags.projects, identity, localProjectId]);
 
     const flush = useCallback(async () => {
         await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
@@ -217,17 +232,20 @@ export function useCloudProjectSync(localProjectId: string) {
     }, [persist]);
 
     useEffect(() => {
-        if (!project || !authenticated || !featureFlags.projects || project.cloud?.conflictVersion) return;
-        const timer = setTimeout(() => { void flush().catch(() => undefined); }, 1000);
+        if (!project || !bindingMatchesIdentity || !identity || !featureFlags.projects || project.cloud?.conflictVersion) return;
+        const timer = setTimeout(() => {
+            void flush().catch(() => undefined);
+        }, 1000);
         return () => clearTimeout(timer);
-    }, [authenticated, featureFlags.projects, flush, project?.cloud?.conflictVersion, project?.title, project?.updatedAt]);
+    }, [bindingMatchesIdentity, featureFlags.projects, flush, identity, project?.cloud?.conflictVersion, project?.title, project?.updatedAt]);
 
-    const enabled = CLOUD_BACKEND_CONFIGURED && authenticated && featureFlags.projects;
+    const enabled = CLOUD_BACKEND_CONFIGURED && featureFlags.projects && Boolean(identity) && bindingMatchesIdentity;
     return {
         enabled,
-        canResume: CLOUD_BACKEND_CONFIGURED && authenticated,
+        canResume: CLOUD_BACKEND_CONFIGURED && Boolean(identity) && bindingMatchesIdentity,
         canRunImage: enabled && featureFlags.imageGeneration && featureFlags.credits,
         canRunVideo: enabled && featureFlags.videoGeneration && featureFlags.credits,
+        identityKey: identity ? cloudMigrationRecordKey(identity) : null,
         flush,
         conflictVersion: project?.cloud?.conflictVersion,
     };

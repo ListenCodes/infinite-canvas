@@ -28,6 +28,16 @@ interface VideoRecoveryNode {
 const terminalWithoutMaterialization = new Set(["failed", "canceled", "outcome_unknown"]);
 const terminal = new Set(["succeeded", ...terminalWithoutMaterialization]);
 
+export function abortCloudIdentityRequests<T extends { controller: AbortController }>(requests: Map<string, T>): void {
+    const controllers = new Set(Array.from(requests.values(), (request) => request.controller));
+    controllers.forEach((controller) => controller.abort());
+    requests.clear();
+}
+
+export function cloudIdentityRequestMayContinue(signal: AbortSignal): boolean {
+    return !signal.aborted;
+}
+
 export function cloudImageRetryMode(image: { status: string; cloud?: { serverStatus: string } }): "attempt" | "materialize" | null {
     if (!image.cloud) return null;
     if (["failed", "canceled"].includes(image.cloud.serverStatus)) return "attempt";
@@ -132,9 +142,7 @@ export async function resumeCloudVideoBatchesCore(options: {
         }
         if (!batchId || !serverStatus) continue;
         const recoverable =
-            Boolean(node.metadata?.cloudJob?.retryIdempotencyKey) ||
-            !terminal.has(serverStatus) ||
-            (serverStatus === "succeeded" && (!node.metadata?.content || !node.metadata.storageKey || !(await options.hasBlob(node.metadata.storageKey))));
+            Boolean(node.metadata?.cloudJob?.retryIdempotencyKey) || !terminal.has(serverStatus) || (serverStatus === "succeeded" && (!node.metadata?.content || !node.metadata.storageKey || !(await options.hasBlob(node.metadata.storageKey))));
         if (recoverable) void options.watchBatch(batchId, node.id, options.signal).catch(() => undefined);
     }
 }

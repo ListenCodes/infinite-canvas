@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { App, Button, Tag } from "antd";
-import { CloudDownload, CloudUpload, Download, FileUp, Plus } from "lucide-react";
+import { CloudDownload, CloudUpload, Download, FileUp, Plus, RefreshCw } from "lucide-react";
 import { saveAs } from "file-saver";
 import { useTranslation } from "react-i18next";
 
@@ -52,9 +52,7 @@ export default function CanvasPage() {
     const activateCloudMigration = () => {
         modal.confirm({
             title: t("cloud.activateMigration"),
-            content: cloudMigration.localChangesSinceExport
-                ? t("cloud.activateMigrationChangedConfirm")
-                : t("cloud.activateMigrationConfirm"),
+            content: cloudMigration.localChangesSinceExport ? t("cloud.activateMigrationChangedConfirm") : t("cloud.activateMigrationConfirm"),
             okText: t("cloud.activateMigration"),
             onOk: () => cloudMigration.activate(),
         });
@@ -96,11 +94,7 @@ export default function CanvasPage() {
                 manifestValue.files.map((value) => {
                     if (!value || typeof value !== "object") throw new Error("migration manifest file is invalid");
                     const file = value as Record<string, unknown>;
-                    if (
-                        typeof file.path !== "string" ||
-                        typeof file.bytes !== "string" || !/^\d+$/.test(file.bytes) ||
-                        typeof file.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(file.sha256)
-                    ) throw new Error("migration manifest file is invalid");
+                    if (typeof file.path !== "string" || typeof file.bytes !== "string" || !/^\d+$/.test(file.bytes) || typeof file.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(file.sha256)) throw new Error("migration manifest file is invalid");
                     return [file.path, { bytes: Number(file.bytes), sha256: file.sha256 }] as const;
                 }),
             );
@@ -138,9 +132,7 @@ export default function CanvasPage() {
                 }),
             );
             if (rollback.localAssets.length) {
-                useAssetStore.getState().replaceAssets(
-                    restoreCloudMigrationLocalAssets(rollback.localAssets, restoredUrls, useAssetStore.getState().assets) as Asset[],
-                );
+                useAssetStore.getState().replaceAssets(restoreCloudMigrationLocalAssets(rollback.localAssets, restoredUrls, useAssetStore.getState().assets) as Asset[]);
             }
             rollback.projects.forEach((project) => importProject({ ...project.document, title: project.title }));
             message.success(t("canvas.imported", { count: rollback.projects.length }));
@@ -185,6 +177,7 @@ export default function CanvasPage() {
                                 {t("cloud.activateMigration")}
                             </Button>
                         ) : null}
+                        {cloudMigration.recordLoadFailed ? <Button icon={<RefreshCw className="size-4" />} onClick={cloudMigration.retryRecordLoad} title={t("cloud.retryMigrationLoad")} aria-label={t("cloud.retryMigrationLoad")} /> : null}
                         {cloudMigration.available && (!cloudMigration.record || cloudMigration.record.status === "failed") ? (
                             <Button disabled={!projects.length || cloudMigration.busy} loading={cloudMigration.busy} icon={<CloudUpload className="size-4" />} onClick={() => void migrateToCloud()}>
                                 {cloudMigration.record?.status === "failed" ? t("cloud.retryMigration") : t("cloud.migrate")}
@@ -192,7 +185,16 @@ export default function CanvasPage() {
                         ) : null}
                         {selectedIds.length ? (
                             <>
-                                <Button disabled={!hydrated} icon={<Download className="size-4" />} onClick={() => void exportCanvasProjects(projects.filter((project) => selectedIds.includes(project.id)), `${t("canvas.title")}-${selectedIds.length}`)}>
+                                <Button
+                                    disabled={!hydrated}
+                                    icon={<Download className="size-4" />}
+                                    onClick={() =>
+                                        void exportCanvasProjects(
+                                            projects.filter((project) => selectedIds.includes(project.id)),
+                                            `${t("canvas.title")}-${selectedIds.length}`,
+                                        )
+                                    }
+                                >
                                     {t("canvas.exportSelected")}
                                 </Button>
                                 <Button disabled={!hydrated} onClick={() => setDeleteIds(selectedIds)}>

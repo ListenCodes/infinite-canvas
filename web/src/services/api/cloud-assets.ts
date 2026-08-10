@@ -6,18 +6,19 @@ export async function sha256Hex(blob: Blob): Promise<string> {
     const digest = await crypto.subtle.digest("SHA-256", await blob.arrayBuffer());
     return Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, "0")).join("");
 }
-export function createCloudUploadIntent(input: unknown, idempotencyKey: string) {
+export function createCloudUploadIntent(input: unknown, idempotencyKey: string, signal?: AbortSignal) {
     return cloudFetch("/v1/assets/upload-intents", assetUploadIntentResponseSchema, {
         method: "POST",
         headers: { "Idempotency-Key": idempotencyKey },
         body: JSON.stringify(assetUploadIntentRequestSchema.parse(input)),
+        signal,
     });
 }
-export function completeCloudUpload(assetId: string) {
-    return cloudFetch(`/v1/assets/${assetId}/complete`, assetCompleteResponseSchema, { method: "POST" });
+export function completeCloudUpload(assetId: string, signal?: AbortSignal) {
+    return cloudFetch(`/v1/assets/${assetId}/complete`, assetCompleteResponseSchema, { method: "POST", signal });
 }
-export function getCloudAssetStatus(assetId: string) {
-    return cloudFetch(`/v1/assets/${assetId}`, assetStatusResponseSchema);
+export function getCloudAssetStatus(assetId: string, signal?: AbortSignal) {
+    return cloudFetch(`/v1/assets/${assetId}`, assetStatusResponseSchema, { signal });
 }
 export function getCloudAssetUrl(assetId: string) {
     return cloudFetch(`/v1/assets/${assetId}/signed-url`, assetSignedUrlResponseSchema);

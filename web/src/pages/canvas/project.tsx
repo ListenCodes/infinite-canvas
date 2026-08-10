@@ -91,7 +91,7 @@ import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio } from "@/types/media";
 import { useCloudProjectSync } from "@/pages/canvas/hooks/use-cloud-project-sync";
 import { rematerializeCloudImageJob, resumeCloudImageBatches, runCloudImageGeneration, watchCloudImageBatch } from "@/pages/canvas/cloud-image-generation";
-import { cloudImageRetryMode } from "@/pages/canvas/cloud-generation-recovery-drivers";
+import { abortCloudIdentityRequests, cloudIdentityRequestMayContinue, cloudImageRetryMode } from "@/pages/canvas/cloud-generation-recovery-drivers";
 import { resumeCloudVideoBatches, runCloudVideoGeneration, watchCloudVideoBatch } from "@/pages/canvas/cloud-video-generation";
 import { resumeCloudProjectGenerations } from "@/pages/canvas/cloud-generation-resume";
 import { cancelCloudGenerationJob, getCloudProjectActiveJobs, retryCloudGenerationJob } from "@/services/api/cloud-generation";
@@ -305,6 +305,14 @@ function InfiniteCanvasPage() {
         if (request?.controller === controller) generationRequestsRef.current.delete(targetNodeId);
     }, []);
 
+    const cloudIdentityRef = useRef(cloudSync.identityKey);
+    useEffect(() => {
+        if (cloudIdentityRef.current === cloudSync.identityKey) return;
+        abortCloudIdentityRequests(generationRequestsRef.current);
+        setRunningNodeId(null);
+        cloudIdentityRef.current = cloudSync.identityKey;
+    }, [cloudSync.identityKey]);
+
     const stopGenerationByRunningId = useCallback(
         async (runningId: string) => {
             const affectedNodeIds = new Set<string>();
@@ -409,18 +417,18 @@ function InfiniteCanvasPage() {
         const controller = new AbortController();
         const remoteProjectId = currentProject?.cloud?.projectId;
         void resumeCloudProjectGenerations({
-                nodes: nodesRef.current,
-                setNodes,
-                signal: controller.signal,
-                ...(remoteProjectId ? { remoteProjectId } : {}),
-                getActiveJobs: getCloudProjectActiveJobs,
-                resumeImages: resumeCloudImageBatches,
-                resumeVideos: resumeCloudVideoBatches,
-            }).catch((error: unknown) => {
-                if (!controller.signal.aborted) console.error("Cloud generation recovery failed", error);
-            });
+            nodes: nodesRef.current,
+            setNodes,
+            signal: controller.signal,
+            ...(remoteProjectId ? { remoteProjectId } : {}),
+            getActiveJobs: getCloudProjectActiveJobs,
+            resumeImages: resumeCloudImageBatches,
+            resumeVideos: resumeCloudVideoBatches,
+        }).catch((error: unknown) => {
+            if (!controller.signal.aborted) console.error("Cloud generation recovery failed", error);
+        });
         return () => controller.abort();
-    }, [cloudSync.canResume, currentProject?.cloud?.projectId, projectId, projectLoaded]);
+    }, [cloudSync.canResume, cloudSync.identityKey, currentProject?.cloud?.projectId, projectId, projectLoaded]);
 
     useEffect(() => {
         if (!projectLoaded || !["new", "recent", "choose"].includes(searchParams.get("mode") || "")) return;
@@ -2632,7 +2640,9 @@ function InfiniteCanvasPage() {
                                 : item,
                         ),
                     );
-                    const retried = await retryCloudGenerationJob(cloudImage.cloud.jobId, idempotencyKey);
+                    if (!cloudIdentityRequestMayContinue(controller.signal)) return;
+                    const retried = await retryCloudGenerationJob(cloudImage.cloud.jobId, idempotencyKey, controller.signal);
+                    if (!cloudIdentityRequestMayContinue(controller.signal)) return;
                     await persistRetryNodes((prev) =>
                         prev.map((item) =>
                             item.id === node.id
@@ -2650,6 +2660,7 @@ function InfiniteCanvasPage() {
                                 : item,
                         ),
                     );
+                    if (!cloudIdentityRequestMayContinue(controller.signal)) return;
                     await watchCloudImageBatch(cloudImage.cloud.batchId, node.id, setNodes, controller.signal);
                 } catch (error) {
                     if (!isGenerationCanceled(error)) {
@@ -2680,7 +2691,9 @@ function InfiniteCanvasPage() {
                     await persistRetryNodes((prev) =>
                         prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_LOADING, errorDetails: undefined, cloudJob: { ...item.metadata!.cloudJob!, retryIdempotencyKey: idempotencyKey } } } : item)),
                     );
-                    const retried = await retryCloudGenerationJob(node.metadata.cloudJob.jobId, idempotencyKey);
+                    if (!cloudIdentityRequestMayContinue(controller.signal)) return;
+                    const retried = await retryCloudGenerationJob(node.metadata.cloudJob.jobId, idempotencyKey, controller.signal);
+                    if (!cloudIdentityRequestMayContinue(controller.signal)) return;
                     await persistRetryNodes((prev) =>
                         prev.map((item) =>
                             item.id === node.id
@@ -2694,6 +2707,7 @@ function InfiniteCanvasPage() {
                                 : item,
                         ),
                     );
+                    if (!cloudIdentityRequestMayContinue(controller.signal)) return;
                     await watchCloudVideoBatch(node.metadata.cloudJob.batchId, node.id, setNodes, controller.signal);
                 } catch (error) {
                     if (!isGenerationCanceled(error)) {

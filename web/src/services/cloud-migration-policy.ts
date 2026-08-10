@@ -3,6 +3,21 @@ export interface CloudMigrationIdentity {
     workspaceId: string;
 }
 
+interface CloudMigrationStartRecord extends CloudMigrationIdentity {
+    status: string;
+}
+
+interface CloudProjectBindingIdentity extends CloudMigrationIdentity {
+    projectId: string;
+    version: number;
+}
+
+interface CloudProjectResponseIdentity {
+    id: string;
+    workspaceId: string;
+    version: number;
+}
+
 export type CloudMigrationBusyCounts = Readonly<Record<string, number>>;
 
 export interface LocalProjectRevision {
@@ -18,11 +33,7 @@ export function cloudMigrationRecordKey(identity: CloudMigrationIdentity): strin
     return `current-v2:${encodeURIComponent(identity.userId)}:${encodeURIComponent(identity.workspaceId)}`;
 }
 
-export function updateCloudMigrationBusyCounts(
-    counts: CloudMigrationBusyCounts,
-    identity: CloudMigrationIdentity,
-    delta: 1 | -1,
-): CloudMigrationBusyCounts {
+export function updateCloudMigrationBusyCounts(counts: CloudMigrationBusyCounts, identity: CloudMigrationIdentity, delta: 1 | -1): CloudMigrationBusyCounts {
     const key = cloudMigrationRecordKey(identity);
     const nextCount = Math.max(0, (counts[key] ?? 0) + delta);
     if (nextCount === 0) {
@@ -34,45 +45,74 @@ export function updateCloudMigrationBusyCounts(
     return { ...counts, [key]: nextCount };
 }
 
-export function isCloudMigrationBusy(
-    counts: CloudMigrationBusyCounts,
-    identity: CloudMigrationIdentity | null,
-): boolean {
+export function isCloudMigrationBusy(counts: CloudMigrationBusyCounts, identity: CloudMigrationIdentity | null): boolean {
     return identity ? (counts[cloudMigrationRecordKey(identity)] ?? 0) > 0 : false;
 }
 
-export function cloudMigrationBelongsTo(
-    record: CloudMigrationIdentity,
-    identity: CloudMigrationIdentity,
-): boolean {
+export function cloudMigrationBelongsTo(record: CloudMigrationIdentity, identity: CloudMigrationIdentity): boolean {
     return record.userId === identity.userId && record.workspaceId === identity.workspaceId;
 }
 
-export function localProjectsChangedSinceExport(
-    baseline: Readonly<Record<string, string>>,
-    current: readonly LocalProjectRevision[],
-): boolean {
+export function cloudProjectBindingMatchesIdentity(binding: CloudMigrationIdentity | undefined, identity: CloudMigrationIdentity | null): boolean {
+    if (!identity) return false;
+    return !binding || cloudMigrationBelongsTo(binding, identity);
+}
+
+export function cloudProjectResponseMayUpdateBinding(options: {
+    identity: CloudMigrationIdentity;
+    capturedBinding: CloudProjectBindingIdentity | undefined;
+    latestBinding: CloudProjectBindingIdentity | undefined;
+    response: CloudProjectResponseIdentity;
+}): boolean {
+    const { capturedBinding, identity, latestBinding, response } = options;
+    if (response.workspaceId !== identity.workspaceId || !cloudProjectBindingMatchesIdentity(latestBinding, identity)) return false;
+    if (capturedBinding) {
+        return Boolean(cloudMigrationBelongsTo(capturedBinding, identity) && latestBinding && latestBinding.projectId === capturedBinding.projectId && latestBinding.version === capturedBinding.version && response.id === capturedBinding.projectId);
+    }
+    return !latestBinding || (latestBinding.projectId === response.id && latestBinding.version <= response.version);
+}
+
+export function isCloudMigrationIdentityLoaded(loadedIdentityKey: string | null, identity: CloudMigrationIdentity | null): boolean {
+    return Boolean(identity && loadedIdentityKey === cloudMigrationRecordKey(identity));
+}
+
+const cloudMigrationLoadRetryDelaysMs = [500, 1_500] as const;
+
+export function cloudMigrationLoadRetryDelay(failureCount: number): number | null {
+    if (!Number.isInteger(failureCount) || failureCount < 1) return null;
+    return cloudMigrationLoadRetryDelaysMs[failureCount - 1] ?? null;
+}
+
+export async function ensureCloudMigrationCanStart<T extends CloudMigrationStartRecord>(options: {
+    identity: CloudMigrationIdentity;
+    loadedIdentityKey: string | null;
+    currentRecord: T | null;
+    loadRecord: (identity: CloudMigrationIdentity) => Promise<T | null>;
+}): Promise<T | null> {
+    if (!isCloudMigrationIdentityLoaded(options.loadedIdentityKey, options.identity)) {
+        throw new Error("Cloud migration record has not finished loading");
+    }
+    if (options.currentRecord && options.currentRecord.status !== "failed") {
+        throw new Error("The current cloud migration must be resolved before starting another one");
+    }
+    const persisted = await options.loadRecord(options.identity);
+    if (persisted && persisted.status !== "failed") {
+        throw new Error("The current cloud migration must be resolved before starting another one");
+    }
+    return persisted;
+}
+
+export function localProjectsChangedSinceExport(baseline: Readonly<Record<string, string>>, current: readonly LocalProjectRevision[]): boolean {
     if (Object.keys(baseline).length !== current.length) return true;
     return current.some((project) => baseline[project.id] !== project.updatedAt);
 }
 
-export function isCloudImportPublishedFor(
-    detail: unknown,
-    identity: CloudMigrationIdentity,
-): detail is CloudImportPublishedDetail {
+export function isCloudImportPublishedFor(detail: unknown, identity: CloudMigrationIdentity): detail is CloudImportPublishedDetail {
     if (!detail || typeof detail !== "object") return false;
     const candidate = detail as Partial<CloudImportPublishedDetail>;
-    return (
-        candidate.userId === identity.userId &&
-        candidate.workspaceId === identity.workspaceId &&
-        typeof candidate.clientExportId === "string" &&
-        candidate.clientExportId.length > 0
-    );
+    return candidate.userId === identity.userId && candidate.workspaceId === identity.workspaceId && typeof candidate.clientExportId === "string" && candidate.clientExportId.length > 0;
 }
 
-export function cloudMigrationActivationMatches(
-    record: CloudMigrationIdentity & { clientExportId: string },
-    detail: unknown,
-): boolean {
+export function cloudMigrationActivationMatches(record: CloudMigrationIdentity & { clientExportId: string }, detail: unknown): boolean {
     return isCloudImportPublishedFor(detail, record) && detail.clientExportId === record.clientExportId;
 }

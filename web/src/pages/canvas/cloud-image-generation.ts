@@ -38,17 +38,38 @@ function markMaterializationError(rootId: string, slotId: string, message: strin
     );
 }
 
-async function referenceBlob(reference: ReferenceImage): Promise<Blob> {
+function throwIfAborted(signal?: AbortSignal): void {
+    if (signal?.aborted) throw signal.reason;
+}
+
+function waitForAbortableDelay(delayMs: number, signal?: AbortSignal): Promise<void> {
+    throwIfAborted(signal);
+    return new Promise<void>((resolve, reject) => {
+        const timer = window.setTimeout(() => {
+            signal?.removeEventListener("abort", onAbort);
+            resolve();
+        }, delayMs);
+        const onAbort = () => {
+            window.clearTimeout(timer);
+            reject(signal?.reason);
+        };
+        signal?.addEventListener("abort", onAbort, { once: true });
+    });
+}
+
+async function referenceBlob(reference: ReferenceImage, signal?: AbortSignal): Promise<Blob> {
     const stored = reference.storageKey ? await getImageBlob(reference.storageKey) : null;
+    throwIfAborted(signal);
     if (stored) return stored;
-    const response = await fetch(reference.dataUrl);
+    const response = await fetch(reference.dataUrl, { signal });
     if (!response.ok) throw new Error("Could not read a reference image");
     return response.blob();
 }
 
-export async function uploadCloudImageReference(reference: ReferenceImage): Promise<string> {
-    const blob = await referenceBlob(reference);
+export async function uploadCloudImageReference(reference: ReferenceImage, signal?: AbortSignal): Promise<string> {
+    const blob = await referenceBlob(reference, signal);
     const sha256 = await sha256Hex(blob);
+    throwIfAborted(signal);
     const request = {
         kind: "image" as const,
         mime: blob.type || reference.type || "image/png",
@@ -56,9 +77,10 @@ export async function uploadCloudImageReference(reference: ReferenceImage): Prom
         sha256,
         filename: reference.name || `${reference.id}.png`,
     };
-    let intent = await createCloudUploadIntent(request, `asset-upload:${sha256}`);
+    let intent = await createCloudUploadIntent(request, `asset-upload:${sha256}`, signal);
     if (intent.status === "rejected") {
-        intent = await createCloudUploadIntent(request, getOrCreateCloudUploadRetryKey(sha256));
+        throwIfAborted(signal);
+        intent = await createCloudUploadIntent(request, getOrCreateCloudUploadRetryKey(sha256), signal);
         if (intent.status === "rejected") {
             rotateCloudUploadRetryKey(sha256);
             throw new Error("Reference upload was rejected");
@@ -73,16 +95,17 @@ export async function uploadCloudImageReference(reference: ReferenceImage): Prom
             method: "PUT",
             headers: { "Content-Type": blob.type || reference.type || "image/png", "x-upsert": "false" },
             body: blob,
+            signal,
         });
         if (!uploaded.ok && uploaded.status !== 409) throw new Error(`Reference upload failed with HTTP ${uploaded.status}`);
-        const completion = await completeCloudUpload(intent.assetId);
+        const completion = await completeCloudUpload(intent.assetId, signal);
         if (completion.status === "ready") {
             clearCloudUploadRetryKey(sha256);
             return intent.assetId;
         }
     }
     for (let attempt = 0; attempt < 60; attempt += 1) {
-        const current = await getCloudAssetStatus(intent.assetId);
+        const current = await getCloudAssetStatus(intent.assetId, signal);
         if (current.status === "ready") {
             clearCloudUploadRetryKey(sha256);
             return intent.assetId;
@@ -91,7 +114,7 @@ export async function uploadCloudImageReference(reference: ReferenceImage): Prom
             rotateCloudUploadRetryKey(sha256);
             throw new Error("Reference upload was rejected");
         }
-        await new Promise((resolve) => setTimeout(resolve, 1000));
+        await waitForAbortableDelay(1000, signal);
     }
     throw new Error("Reference upload verification timed out");
 }
@@ -202,12 +225,13 @@ export async function watchCloudImageBatch(batchId: string, rootId: string, setN
         signal: streamController.signal,
         initialCursor: cursor,
         loadSnapshot: (eventSignal) => getCloudGenerationBatch(batchId, eventSignal),
-        subscribe: ({ projectId, cursor: eventCursor, signal: eventSignal, onEventSequence }) => subscribeCloudEvents({
-            projectId,
-            cursor: eventCursor,
-            signal: eventSignal,
-            onEvent: (event) => onEventSequence(event.sequence),
-        }),
+        subscribe: ({ projectId, cursor: eventCursor, signal: eventSignal, onEventSequence }) =>
+            subscribeCloudEvents({
+                projectId,
+                cursor: eventCursor,
+                signal: eventSignal,
+                onEvent: (event) => onEventSequence(event.sequence),
+            }),
         onEvent: () => wake.notify(),
     });
     try {
@@ -241,10 +265,11 @@ export async function runCloudImageGeneration(options: {
     setNodes: SetNodes;
     signal: AbortSignal;
 }) {
-    const models = await listCloudModels("image");
+    const models = await listCloudModels("image", options.signal);
     const model = models[0];
     if (!model) throw new Error("No active cloud image model is configured");
-    const referenceAssetIds = await Promise.all(options.references.map(uploadCloudImageReference));
+    const referenceAssetIds = await Promise.all(options.references.map((reference) => uploadCloudImageReference(reference, options.signal)));
+    throwIfAborted(options.signal);
     const request = createGenerationBatchRequestSchema.parse({
         projectId: options.remoteProjectId,
         kind: "image",
@@ -256,26 +281,22 @@ export async function runCloudImageGeneration(options: {
     });
     let created;
     try {
-        created = await createCloudGenerationBatch(request, options.idempotencyKey);
+        created = await createCloudGenerationBatch(request, options.idempotencyKey, options.signal);
     } catch {
+        throwIfAborted(options.signal);
         try {
             // The business POST is protected by the same persisted idempotency key; retrying it cannot create another batch.
-            created = await createCloudGenerationBatch(request, options.idempotencyKey);
+            created = await createCloudGenerationBatch(request, options.idempotencyKey, options.signal);
         } catch {
-            created = await resolveCloudGenerationBatch(options.remoteProjectId, options.idempotencyKey);
+            throwIfAborted(options.signal);
+            created = await resolveCloudGenerationBatch(options.remoteProjectId, options.idempotencyKey, options.signal);
         }
     }
     updateJobs(options.rootId, created.jobs, options.setNodes);
     return watchCloudImageBatch(created.batchId, options.rootId, options.setNodes, options.signal);
 }
 
-export async function resumeCloudImageBatches(
-    nodes: readonly CanvasNodeData[],
-    setNodes: SetNodes,
-    signal: AbortSignal,
-    remoteProjectId?: string,
-    authoritativeJobs: readonly ActiveGenerationJobProjection[] = [],
-): Promise<void> {
+export async function resumeCloudImageBatches(nodes: readonly CanvasNodeData[], setNodes: SetNodes, signal: AbortSignal, remoteProjectId?: string, authoritativeJobs: readonly ActiveGenerationJobProjection[] = []): Promise<void> {
     return resumeCloudImageBatchesCore({
         nodes,
         signal,

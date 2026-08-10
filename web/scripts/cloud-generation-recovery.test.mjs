@@ -3,13 +3,29 @@ import test from "node:test";
 
 import { buildCloudEventRequest, GenerationEventDecoder, newerEventCursor } from "../src/services/api/cloud-event-stream.ts";
 import { resumeCloudProjectGenerations } from "../src/pages/canvas/cloud-generation-resume.ts";
-import { cloudImageRetryMode, resumeCloudImageBatchesCore, resumeCloudVideoBatchesCore } from "../src/pages/canvas/cloud-generation-recovery-drivers.ts";
+import { abortCloudIdentityRequests, cloudIdentityRequestMayContinue, cloudImageRetryMode, resumeCloudImageBatchesCore, resumeCloudVideoBatchesCore } from "../src/pages/canvas/cloud-generation-recovery-drivers.ts";
 import { ActiveGenerationWatchRegistry, CLOUD_GENERATION_CURSOR_SCAN_MS, CloudGenerationWakeChannel, runCloudGenerationEventPump, waitForCloudGenerationCursorScan } from "../src/pages/canvas/cloud-generation-watch-core.ts";
 import { aggregateCloudImageStatus, mergeCloudImageJobStates } from "../src/pages/canvas/cloud-image-state-core.ts";
 import { clearCloudUploadRetryKey, getOrCreateCloudUploadRetryKey, rotateCloudUploadRetryKey } from "../src/services/api/cloud-upload-retry.ts";
 
 const workspaceId = "00000000-0000-4000-8000-000000000101";
 const projectId = "00000000-0000-4000-8000-000000000201";
+
+test("identity changes abort every shared generation controller before another API step", () => {
+    const shared = new AbortController();
+    const independent = new AbortController();
+    const requests = new Map([
+        ["one", { controller: shared }],
+        ["two", { controller: shared }],
+        ["three", { controller: independent }],
+    ]);
+    assert.equal(cloudIdentityRequestMayContinue(shared.signal), true);
+    abortCloudIdentityRequests(requests);
+    assert.equal(shared.signal.aborted, true);
+    assert.equal(independent.signal.aborted, true);
+    assert.equal(cloudIdentityRequestMayContinue(shared.signal), false);
+    assert.equal(requests.size, 0);
+});
 
 function event(sequence) {
     return {
@@ -32,7 +48,10 @@ test("fragmented replay only delivers strictly newer generation events", () => {
         delivered.push(...decoder.push(text.slice(offset, cut)));
         offset = cut;
     }
-    assert.deepEqual(delivered.map(({ sequence }) => sequence), ["12"]);
+    assert.deepEqual(
+        delivered.map(({ sequence }) => sequence),
+        ["12"],
+    );
     assert.equal(decoder.cursor, "12");
 });
 
@@ -69,7 +88,9 @@ test("event pump preserves cursor across EOF and waits before reconnecting", asy
         onEvent: () => undefined,
         waitForReconnect: (delayMs) => {
             reconnects.push(delayMs);
-            return new Promise((resolve) => { releaseReconnect = resolve; });
+            return new Promise((resolve) => {
+                releaseReconnect = resolve;
+            });
         },
     });
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -162,13 +183,19 @@ test("decoder accepts a bare-CR event split across chunks", () => {
     const decoder = new GenerationEventDecoder("0");
     const frame = `id: 3\rdata: ${JSON.stringify(event(3))}\r\r`;
     assert.deepEqual(decoder.push(frame.slice(0, -1)), []);
-    assert.deepEqual(decoder.push(frame.slice(-1)).map(({ sequence }) => sequence), ["3"]);
+    assert.deepEqual(
+        decoder.push(frame.slice(-1)).map(({ sequence }) => sequence),
+        ["3"],
+    );
 });
 
 test("decoder accepts mixed legal SSE newline pairs", () => {
     const decoder = new GenerationEventDecoder("0");
     const frame = `id: 4\r\ndata: ${JSON.stringify(event(4))}\r\n\ndata: ${JSON.stringify(event(5))}\n\r`;
-    assert.deepEqual(decoder.push(frame).map(({ sequence }) => sequence), ["4", "5"]);
+    assert.deepEqual(
+        decoder.push(frame).map(({ sequence }) => sequence),
+        ["4", "5"],
+    );
 });
 
 test("active jobs recovery invokes only the supplied resume drivers", async () => {
@@ -187,7 +214,10 @@ test("active jobs recovery invokes only the supplied resume drivers", async () =
         resumeVideos: async (_nodes, _setNodes, _signal, remote, authoritative) => calls.push(["video", remote, authoritative]),
     });
     assert.equal(calls.length, 2);
-    assert.deepEqual(calls.map(([kind]) => kind), ["image", "video"]);
+    assert.deepEqual(
+        calls.map(([kind]) => kind),
+        ["image", "video"],
+    );
     assert.equal(calls[0][2], jobs);
     assert.equal(calls[1][2], jobs);
 });
@@ -199,7 +229,9 @@ test("active-jobs failure still enters local metadata recovery without creating"
         setNodes: () => undefined,
         signal: new AbortController().signal,
         remoteProjectId: projectId,
-        getActiveJobs: async () => { throw new Error("offline"); },
+        getActiveJobs: async () => {
+            throw new Error("offline");
+        },
         resumeImages: async (_nodes, _setNodes, _signal, _remote, jobs) => jobsSeen.push(jobs),
         resumeVideos: async (_nodes, _setNodes, _signal, _remote, jobs) => jobsSeen.push(jobs),
     });
@@ -226,8 +258,12 @@ test("real image and video recovery drivers watch active and local batches witho
         signal,
         authoritativeJobs: [{ ...baseJob, capability: "image" }],
         updateJobs: (nodeId) => updated.push(["image", nodeId]),
-        watchBatch: async (batchId, nodeId) => { watched.push(["image", batchId, nodeId]); },
-        resolveBatch: async () => { throw new Error("resolve must not run"); },
+        watchBatch: async (batchId, nodeId) => {
+            watched.push(["image", batchId, nodeId]);
+        },
+        resolveBatch: async () => {
+            throw new Error("resolve must not run");
+        },
         hasBlob: async () => false,
     });
     await resumeCloudVideoBatchesCore({
@@ -236,11 +272,18 @@ test("real image and video recovery drivers watch active and local batches witho
         signal,
         authoritativeJobs: [{ ...baseJob, batchId: "00000000-0000-4000-8000-000000000304", jobId: "00000000-0000-4000-8000-000000000404", attemptId: "00000000-0000-4000-8000-000000000504", capability: "video" }],
         updateJob: (nodeId) => updated.push(["video", nodeId]),
-        watchBatch: async (batchId, nodeId) => { watched.push(["video", batchId, nodeId]); },
-        resolveBatch: async () => { throw new Error("resolve must not run"); },
+        watchBatch: async (batchId, nodeId) => {
+            watched.push(["video", batchId, nodeId]);
+        },
+        resolveBatch: async () => {
+            throw new Error("resolve must not run");
+        },
         hasBlob: async () => false,
     });
-    assert.deepEqual(updated, [["image", "node-active"], ["video", "node-active"]]);
+    assert.deepEqual(updated, [
+        ["image", "node-active"],
+        ["video", "node-active"],
+    ]);
     assert.deepEqual(watched, [
         ["image", "00000000-0000-4000-8000-000000000301", "node-active"],
         ["image", "00000000-0000-4000-8000-000000000302", "node-local"],
@@ -270,8 +313,26 @@ test("three image slots preserve success and expose independent failure reasons"
         ],
         [
             { ...baseJob, slotId: "slot-1", jobId: "00000000-0000-4000-8000-000000000421", attemptId: "00000000-0000-4000-8000-000000000521", status: "succeeded" },
-            { ...baseJob, slotIndex: 1, slotId: "slot-2", jobId: "00000000-0000-4000-8000-000000000422", attemptId: "00000000-0000-4000-8000-000000000522", status: "failed", errorCode: "provider_rate_limited", errorMessage: "Provider capacity was exhausted" },
-            { ...baseJob, slotIndex: 2, slotId: "slot-3", jobId: "00000000-0000-4000-8000-000000000423", attemptId: "00000000-0000-4000-8000-000000000523", status: "failed", errorCode: "content_moderation_rejected", errorMessage: "Prompt was rejected by moderation" },
+            {
+                ...baseJob,
+                slotIndex: 1,
+                slotId: "slot-2",
+                jobId: "00000000-0000-4000-8000-000000000422",
+                attemptId: "00000000-0000-4000-8000-000000000522",
+                status: "failed",
+                errorCode: "provider_rate_limited",
+                errorMessage: "Provider capacity was exhausted",
+            },
+            {
+                ...baseJob,
+                slotIndex: 2,
+                slotId: "slot-3",
+                jobId: "00000000-0000-4000-8000-000000000423",
+                attemptId: "00000000-0000-4000-8000-000000000523",
+                status: "failed",
+                errorCode: "content_moderation_rejected",
+                errorMessage: "Prompt was rejected by moderation",
+            },
         ],
     );
     assert.equal(images[0].status, "success");
@@ -312,7 +373,9 @@ test("video recovery resumes the task-id, polling, and download refresh windows"
         signal,
         remoteProjectId: projectId,
         updateJob: (nodeId, job) => updated.push([nodeId, job.status]),
-        watchBatch: async (batchId, nodeId) => { watched.push([batchId, nodeId]); },
+        watchBatch: async (batchId, nodeId) => {
+            watched.push([batchId, nodeId]);
+        },
         resolveBatch: async (_projectId, key) => {
             assert.equal(key, "create-before-task");
             return { batchId: batchIds.beforeTask, eventCursor: "1", projectId, status: "running", jobs: [resolvedJob] };
@@ -337,9 +400,16 @@ test("project switch aborts an in-flight active-jobs request before resume drive
         setNodes: () => undefined,
         signal: controller.signal,
         remoteProjectId: projectId,
-        getActiveJobs: async () => new Promise((resolve) => { releaseRequest = resolve; }),
-        resumeImages: async () => { resumeCalls += 1; },
-        resumeVideos: async () => { resumeCalls += 1; },
+        getActiveJobs: async () =>
+            new Promise((resolve) => {
+                releaseRequest = resolve;
+            }),
+        resumeImages: async () => {
+            resumeCalls += 1;
+        },
+        resumeVideos: async () => {
+            resumeCalls += 1;
+        },
     });
     controller.abort();
     releaseRequest({ jobs: [] });

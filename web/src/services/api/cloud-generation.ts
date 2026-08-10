@@ -14,14 +14,15 @@ import {
 import { authorizedFetch, CloudApiError, cloudFetch } from "./cloud-client";
 import { buildCloudEventRequest, GenerationEventDecoder } from "./cloud-event-stream";
 
-export function listCloudModels(capability?: "image" | "video") {
-    return cloudFetch(`/v1/model-configs${capability ? `?capability=${capability}` : ""}`, modelListResponseSchema);
+export function listCloudModels(capability?: "image" | "video", signal?: AbortSignal) {
+    return cloudFetch(`/v1/model-configs${capability ? `?capability=${capability}` : ""}`, modelListResponseSchema, { signal });
 }
-export function createCloudGenerationBatch(input: CreateGenerationBatchRequest, idempotencyKey: string) {
+export function createCloudGenerationBatch(input: CreateGenerationBatchRequest, idempotencyKey: string, signal?: AbortSignal) {
     return cloudFetch("/v1/generation-batches", createGenerationBatchResponseSchema, {
         method: "POST",
         headers: { "Idempotency-Key": idempotencyKey },
         body: JSON.stringify(createGenerationBatchRequestSchema.parse(input)),
+        signal,
     });
 }
 export function getCloudGenerationBatch(batchId: string, signal?: AbortSignal) {
@@ -85,8 +86,8 @@ export function listCloudGenerationJobs(workspaceId?: string, before?: string) {
     if (before) query.set("before", before);
     return cloudFetch(`/v1/generation-jobs?${query}`, generationTaskListResponseSchema);
 }
-export function retryCloudGenerationJob(jobId: string, idempotencyKey: string) {
-    return cloudFetch(`/v1/generation-jobs/${jobId}/retry`, generationJobProjectionSchema, { method: "POST", headers: { "Idempotency-Key": idempotencyKey } });
+export function retryCloudGenerationJob(jobId: string, idempotencyKey: string, signal?: AbortSignal) {
+    return cloudFetch(`/v1/generation-jobs/${jobId}/retry`, generationJobProjectionSchema, { method: "POST", headers: { "Idempotency-Key": idempotencyKey }, signal });
 }
 export function cancelCloudGenerationJob(jobId: string) {
     return cloudFetch(`/v1/generation-jobs/${jobId}/cancel`, cancelGenerationJobResponseSchema, { method: "POST" });
