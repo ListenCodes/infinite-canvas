@@ -502,6 +502,16 @@ test("recovery fixtures establish capacity policy before generation attempts", a
   assert.ok(attempts > policy);
 });
 
+test("restored attacker verification grants only the RLS lookup helper", async () => {
+  const fixtures = await readFile(resolve(repository, "scripts/recovery/recovery-fixtures.mjs"), "utf8");
+  assert.match(
+    fixtures,
+    /grant execute on function app\.has_workspace_access\(uuid, workspace_role\[\]\) to infinite_canvas_recovery_attacker/,
+  );
+  assert.doesNotMatch(fixtures, /grant execute on all functions[^;]*infinite_canvas_recovery_attacker/i);
+  assert.match(fixtures, /helperAllowed/);
+});
+
 test("drill emits only a redacted report and cleans exact temporary projects", async () => {
   const script = await readFile(resolve(repository, "scripts/recovery/run-local-drill.mjs"), "utf8");
   assert.match(script, /redactAudit/);

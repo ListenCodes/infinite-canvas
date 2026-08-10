@@ -496,16 +496,18 @@ export async function verifyRestoredAccess({ adminUrl, apiUrl, recoveryUrl }) {
         end $$;
         grant usage on schema public, app to infinite_canvas_recovery_attacker;
         grant select, update on projects, assets, generation_jobs, wallet_accounts to infinite_canvas_recovery_attacker;
+        grant execute on function app.has_workspace_access(uuid, workspace_role[]) to infinite_canvas_recovery_attacker;
         set session authorization infinite_canvas_recovery_attacker;
       `);
       await transaction`select set_config('app.user_id', '', true), set_config('app.service_role', 'on', true)`;
+      const helper = await transaction`select app.has_workspace_access(${fixtureIds.workspaceA}) as allowed`;
       const rows = await transaction`select count(*)::int as count from projects`;
       const changed = await transaction`update projects set title = 'forged-service' where id = ${fixtureIds.projectA} returning id`;
       await transaction.unsafe("reset session authorization");
-      return { visible: rows[0]?.count ?? -1, changed: changed.length };
+      return { helperAllowed: helper[0]?.allowed ?? true, visible: rows[0]?.count ?? -1, changed: changed.length };
     });
     await admin.unsafe("drop owned by infinite_canvas_recovery_attacker; drop role infinite_canvas_recovery_attacker");
-    if (forgedServiceRole.visible !== 0 || forgedServiceRole.changed !== 0)
+    if (forgedServiceRole.helperAllowed || forgedServiceRole.visible !== 0 || forgedServiceRole.changed !== 0)
       throw new Error("Untrusted database identity forged service-role access after restore");
     await recovery.begin(async (transaction) => {
       await transaction`select set_config('app.service_role', 'on', true)`;
