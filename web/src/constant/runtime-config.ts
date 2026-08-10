@@ -8,6 +8,10 @@
 type RuntimeConfig = {
     ANALYTICS_GA4_ID?: string; // GA4 measurement ID (G-XXXX)
     ANALYTICS_BAIDU_ID?: string; // Baidu Analytics site ID
+    CLOUD_BACKEND_ENABLED?: string;
+    API_BASE_URL?: string;
+    SUPABASE_URL?: string;
+    SUPABASE_ANON_KEY?: string;
 };
 
 declare global {
@@ -27,3 +31,8 @@ function read(key: keyof RuntimeConfig, buildTime: string | undefined, fallback 
 
 export const ANALYTICS_GA4_ID = read("ANALYTICS_GA4_ID", import.meta.env.VITE_ANALYTICS_GA4_ID);
 export const ANALYTICS_BAIDU_ID = read("ANALYTICS_BAIDU_ID", import.meta.env.VITE_ANALYTICS_BAIDU_ID);
+export const API_BASE_URL = read("API_BASE_URL", import.meta.env.VITE_API_BASE_URL, "/api").replace(/\/$/, "");
+export const SUPABASE_URL = read("SUPABASE_URL", import.meta.env.VITE_SUPABASE_URL);
+export const SUPABASE_ANON_KEY = read("SUPABASE_ANON_KEY", import.meta.env.VITE_SUPABASE_ANON_KEY);
+export const CLOUD_BACKEND_ENABLED = /^(1|true|yes)$/i.test(read("CLOUD_BACKEND_ENABLED", import.meta.env.VITE_CLOUD_BACKEND_ENABLED, "false"));
+export const CLOUD_BACKEND_CONFIGURED = CLOUD_BACKEND_ENABLED && Boolean(API_BASE_URL && SUPABASE_URL && SUPABASE_ANON_KEY);

@@ -114,7 +114,7 @@ export function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | u
 
 export function resetInterruptedGeneration(nodes: CanvasNodeData[]) {
     return nodes.map((node) =>
-        node.metadata?.status === "loading"
+        node.metadata?.status === "loading" && !node.metadata.images?.some((image) => image.cloud && !["succeeded", "failed", "canceled"].includes(image.cloud.serverStatus))
             ? {
                   ...node,
                   metadata: {

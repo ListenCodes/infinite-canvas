@@ -1,6 +1,6 @@
 import type { CSSProperties } from "react";
 import { Tooltip } from "antd";
-import { BookOpen, Keyboard, Puzzle, Settings2 } from "lucide-react";
+import { BookOpen, Keyboard, LogIn, LogOut, Puzzle, Settings2, UserRound } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { AnimatedThemeToggler } from "@/components/ui/animated-theme-toggler";
@@ -12,6 +12,9 @@ import { cn } from "@/lib/utils";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useConfigStore } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
+import { CLOUD_BACKEND_CONFIGURED } from "@/constant/runtime-config";
+import { getSupabaseClient } from "@/services/api/supabase";
+import { useUserStore } from "@/stores/use-user-store";
 
 type UserStatusActionsProps = {
     showConfig?: boolean;
@@ -34,9 +37,25 @@ export function UserStatusActions({ showConfig = true, variant = "default", onOp
     const locale = i18n.resolvedLanguage as AppLocale;
     const nextLocale = locale === "zh-CN" ? "en-US" : "zh-CN";
     const languageLabel = t("topNav.switchLanguage", { language: t(nextLocale === "zh-CN" ? "locale.zhCN" : "locale.enUS") });
+    const authenticated = useUserStore((state) => state.authenticated);
+    const user = useUserStore((state) => state.user);
+    const setAuthDialogOpen = useUserStore((state) => state.setAuthDialogOpen);
 
     return (
         <div className="inline-flex shrink-0 items-center gap-1">
+            {CLOUD_BACKEND_CONFIGURED ? (
+                <button
+                    type="button"
+                    className={naturalIconClass}
+                    style={iconStyle}
+                    onClick={() => authenticated ? void getSupabaseClient()?.auth.signOut() : setAuthDialogOpen(true)}
+                    aria-label={authenticated ? t("cloud.signOut") : t("cloud.signIn")}
+                    title={authenticated ? `${user?.email || user?.displayName || ""} · ${t("cloud.signOut")}` : t("cloud.signIn")}
+                >
+                    {authenticated ? <UserRound className="size-4" /> : <LogIn className="size-4" />}
+                    <span className="sr-only"><LogOut />{authenticated ? t("cloud.signOut") : t("cloud.signIn")}</span>
+                </button>
+            ) : null}
             {onOpenPlugins ? (
                 <button type="button" className={naturalIconClass} style={iconStyle} onClick={onOpenPlugins} aria-label={t("topNav.plugins")} title={t("topNav.plugins")}>
                     <Puzzle className="size-4" />

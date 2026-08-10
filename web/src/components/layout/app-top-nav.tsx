@@ -10,6 +10,7 @@ import { UserStatusActions } from "@/components/layout/user-status-actions";
 import { cn } from "@/lib/utils";
 import { useEffect, useRef, useState } from "react";
 import { useAgentStore } from "@/stores/use-agent-store";
+import { useUserStore } from "@/stores/use-user-store";
 
 export function AppTopNav() {
     const { t } = useTranslation();
@@ -22,9 +23,11 @@ export function AppTopNav() {
     const connectAgent = useAgentStore((state) => state.connectAgent);
     const togglePanel = useAgentStore((state) => state.togglePanel);
     const panelOpen = useAgentStore((state) => state.panelOpen);
+    const platformRole = useUserStore((state) => state.platformRole);
+    const visibleTools = navigationTools.filter((tool) => !("requiresAdmin" in tool) || !tool.requiresAdmin || platformRole === "admin");
     const hideHeader = /^\/canvas\/[^/]+/.test(pathname);
     const slug = pathname.split("/").filter(Boolean)[0];
-    const activeToolSlug = navigationTools.some((tool) => tool.slug === slug) ? (slug as NavigationToolSlug) : undefined;
+    const activeToolSlug = visibleTools.some((tool) => tool.slug === slug) ? (slug as NavigationToolSlug) : undefined;
 
     useEffect(() => {
         if (autoConnectRef.current || agentEnabled || agentConnected || !agentToken.trim()) return;
@@ -60,7 +63,7 @@ export function AppTopNav() {
                             </button>
 
                             <nav className="hide-scrollbar ml-8 hidden h-14 min-w-0 items-center gap-7 overflow-x-auto md:flex">
-                                {navigationTools.map((tool) => {
+                                {visibleTools.map((tool) => {
                                     const Icon = tool.icon;
                                     const active = tool.slug === activeToolSlug;
                                     return (

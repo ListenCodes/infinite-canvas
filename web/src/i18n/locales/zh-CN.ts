@@ -4,6 +4,13 @@ export default {
         description: "一个无限画布创作工具",
     },
     theme: { toggle: "切换主题" },
+    cloud: { signIn: "登录云端", signOut: "退出登录", email: "邮箱", password: "密码", signInFailed: "登录失败", projectConflict: "云端画布已在其他位置更新，请刷新后再试", syncRequired: "画布尚未同步到云端，请稍后重试", featureDisabled: "当前账号尚未启用此云端能力。", migrate: "迁移到云端", retryMigration: "重试迁移", migrationFailed: "云端迁移失败", downloadMigrationArchive: "下载迁移备份", migrationStatuses: { prepared: "已准备", uploaded: "已上传", validating: "校验中", importing: "导入中", published: "已发布", failed: "失败", deleted: "已删除" } },
+    tasks: {
+        title: "生成任务", description: "集中查看各项目由服务端执行的图片与视频任务。", refresh: "刷新", loadFailed: "加载任务失败", actionFailed: "任务操作失败", signInTitle: "登录后查看任务", signInDescription: "云端任务仅对已登录用户开放。", empty: "暂无服务端任务", active: "进行中", unknown: "待核对", type: "类型", status: "状态", slot: "槽位 / 尝试", error: "结果", actions: "操作", wallet: "可用 {{available}} · 冻结 {{reserved}}", capabilities: { image: "图片", video: "视频" }, statuses: { queued: "排队中", dispatching: "派发中", running: "执行中", waiting_provider: "等待上游", materializing: "资产落盘中", succeeded: "已成功", failed: "已失败", cancel_requested: "取消中", canceled: "已取消", outcome_unknown: "待核对" },
+    },
+    admin: {
+        title: "平台管理", description: "管理用户、积分、渠道、核对任务与审计记录。", signInTitle: "请以管理员身份登录", forbiddenTitle: "需要平台管理员权限", forbiddenDescription: "该页面仅对有效的平台管理员开放。", loadFailed: "加载管理数据失败", actionFailed: "管理操作失败", invalidJson: "请输入有效的 JSON", users: "用户", channels: "渠道", jobs: "任务", audit: "审计", user: "用户", role: "角色", status: "状态", workspaces: "工作区", balance: "可用 / 冻结", lastLogin: "最后登录", adjustWallet: "调整积分", features: "云端灰度", featureNames: { projects: "项目同步", imageGeneration: "图片生成", videoGeneration: "视频生成", credits: "积分账本" }, disable: "禁用", restore: "恢复", disableConfirm: "禁用此账号并撤销访问？", restoreConfirm: "恢复此账号？", addChannel: "新增渠道", channel: "渠道", capabilities: "能力", credential: "凭据", rotateCredential: "轮换凭据", addModel: "新增模型", deadline: "释放截止", resolve: "核对", time: "时间", action: "动作", actor: "操作者", target: "目标", reason: "原因", workspace: "工作区", amount: "积分数量", confirmLargeDebit: "确认大额扣减", channelName: "渠道名称", secret: "新密钥", model: "模型", price: "单任务积分", concurrency: "并发上限", providerIdempotency: "上游支持幂等", limitsJson: "限制 JSON", resolution: "核对结论", evidenceJson: "证据 JSON", modals: { wallet: "调整积分", features: "云端灰度", channel: "渠道配置", credential: "轮换凭据", model: "创建模型版本", resolve: "核对未知结果" },
+    },
     modelAdapterErrors: {
         mismatch: "所选模型适配器不支持当前模型能力，请重新选择",
         customScriptMissing: "请选择并保存自定义调用脚本",
@@ -321,6 +328,8 @@ export default {
         video: "视频创作台",
         prompts: "提示词库",
         assets: "我的资产",
+        tasks: "任务",
+        admin: "管理",
         config: "配置",
     },
     topNav: {

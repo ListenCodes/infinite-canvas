@@ -35,6 +35,18 @@ export type CanvasNodeImage = {
     naturalHeight: number;
     bytes: number;
     mimeType: string;
+    cloud?: {
+        batchId: string;
+        jobId: string;
+        slotId: string;
+        jobVersion: number;
+        attemptId: string;
+        attemptNo: number;
+        serverStatus: string;
+        progress?: number;
+        assetId?: string;
+        retryIdempotencyKey?: string;
+    };
 };
 
 export type CanvasNodeMetadata = {
@@ -72,6 +84,20 @@ export type CanvasNodeMetadata = {
     durationMs?: number;
     groupId?: string;
     interactive?: boolean; // Plugin node interaction/move state; see CanvasNodeDefinition.interactionToggle.
+    cloudBatchId?: string;
+    cloudIdempotencyKey?: string;
+    cloudSlotId?: string;
+    cloudJob?: {
+        batchId: string;
+        jobId: string;
+        slotId: string;
+        jobVersion: number;
+        attemptId: string;
+        attemptNo: number;
+        serverStatus: string;
+        assetId?: string;
+        retryIdempotencyKey?: string;
+    };
 };
 
 export type CanvasNodeData = {

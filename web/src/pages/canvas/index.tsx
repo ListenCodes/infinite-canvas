@@ -1,7 +1,8 @@
 import { useEffect, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { App, Button } from "antd";
-import { Download, FileUp, Plus } from "lucide-react";
+import { App, Button, Tag } from "antd";
+import { CloudUpload, Download, FileUp, Plus } from "lucide-react";
+import { saveAs } from "file-saver";
 import { useTranslation } from "react-i18next";
 
 import { readZip } from "@/lib/zip";
@@ -13,6 +14,7 @@ import type { CanvasExportFile } from "@/types/canvas-export";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { useCanvasUiStore } from "@/stores/canvas/use-canvas-ui-store";
 import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
+import { useCloudMigration } from "@/hooks/use-cloud-migration";
 
 export default function CanvasPage() {
     const { message } = App.useApp();
@@ -27,6 +29,7 @@ export default function CanvasPage() {
     const importProject = useCanvasStore((state) => state.importProject);
     const selectedIds = useCanvasUiStore((state) => state.selectedProjectIds);
     const setDeleteIds = useCanvasUiStore((state) => state.setDeleteProjectIds);
+    const cloudMigration = useCloudMigration();
 
     const mode = searchParams.get("mode");
     const agentMode = mode === "new" || mode === "recent" || mode === "choose";
@@ -35,6 +38,14 @@ export default function CanvasPage() {
         navigate(`/canvas/${id}${agentQuery}`);
     };
     const createAndEnter = () => enterProject(createProject(t("canvas.defaultTitle", { count: projects.length + 1 })));
+    const migrateToCloud = async () => {
+        try {
+            if (cloudMigration.record?.status === "failed") await cloudMigration.retry();
+            else await cloudMigration.start();
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : t("cloud.migrationFailed"));
+        }
+    };
     const importCanvas = async (file?: File) => {
         if (!file) return;
         try {
@@ -78,6 +89,15 @@ export default function CanvasPage() {
                         <h1 className="mt-3 text-3xl font-semibold">{t("canvas.title")}</h1>
                     </div>
                     <div className="flex items-center gap-2">
+                        {cloudMigration.record ? <Tag>{t(`cloud.migrationStatuses.${cloudMigration.record.status}`)}</Tag> : null}
+                        {cloudMigration.record ? (
+                            <Button icon={<Download className="size-4" />} onClick={() => saveAs(cloudMigration.record!.archive, `infinite-canvas-${cloudMigration.record!.clientExportId}.zip`)} title={t("cloud.downloadMigrationArchive")} aria-label={t("cloud.downloadMigrationArchive")} />
+                        ) : null}
+                        {cloudMigration.available ? (
+                            <Button disabled={!projects.length || cloudMigration.busy || (["uploaded", "validating", "importing"].includes(cloudMigration.record?.status ?? ""))} loading={cloudMigration.busy} icon={<CloudUpload className="size-4" />} onClick={() => void migrateToCloud()}>
+                                {cloudMigration.record?.status === "failed" ? t("cloud.retryMigration") : t("cloud.migrate")}
+                            </Button>
+                        ) : null}
                         {selectedIds.length ? (
                             <>
                                 <Button disabled={!hydrated} icon={<Download className="size-4" />} onClick={() => void exportCanvasProjects(projects.filter((project) => selectedIds.includes(project.id)), `${t("canvas.title")}-${selectedIds.length}`)}>

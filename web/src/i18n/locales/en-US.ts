@@ -4,6 +4,13 @@ export default {
         description: "An infinite canvas creation tool",
     },
     theme: { toggle: "Toggle theme" },
+    cloud: { signIn: "Sign in to cloud", signOut: "Sign out", email: "Email", password: "Password", signInFailed: "Sign-in failed", projectConflict: "This cloud canvas changed elsewhere. Refresh before trying again.", syncRequired: "The canvas has not synced to the cloud yet. Try again shortly.", featureDisabled: "This cloud capability is not enabled for your account.", migrate: "Migrate to cloud", retryMigration: "Retry migration", migrationFailed: "Cloud migration failed", downloadMigrationArchive: "Download migration archive", migrationStatuses: { prepared: "Prepared", uploaded: "Uploaded", validating: "Validating", importing: "Importing", published: "Published", failed: "Failed", deleted: "Deleted" } },
+    tasks: {
+        title: "Generation tasks", description: "Track server-side image and video work across projects.", refresh: "Refresh", loadFailed: "Could not load tasks", actionFailed: "Task action failed", signInTitle: "Sign in to view tasks", signInDescription: "Cloud tasks are available after authentication.", empty: "No server-side tasks", active: "Active", unknown: "Needs review", type: "Type", status: "Status", slot: "Slot / attempt", error: "Result", actions: "Actions", wallet: "Available {{available}} · reserved {{reserved}}", capabilities: { image: "Image", video: "Video" }, statuses: { queued: "Queued", dispatching: "Dispatching", running: "Running", waiting_provider: "Waiting for provider", materializing: "Saving asset", succeeded: "Succeeded", failed: "Failed", cancel_requested: "Cancel requested", canceled: "Canceled", outcome_unknown: "Needs review" },
+    },
+    admin: {
+        title: "Platform administration", description: "Operate users, billing, providers, reconciliation, and audit history.", signInTitle: "Sign in as an administrator", forbiddenTitle: "Administrator access required", forbiddenDescription: "This page is limited to active platform administrators.", loadFailed: "Could not load administration data", actionFailed: "Administration action failed", invalidJson: "Enter valid JSON", users: "Users", channels: "Channels", jobs: "Tasks", audit: "Audit", user: "User", role: "Role", status: "Status", workspaces: "Workspaces", balance: "Available / reserved", lastLogin: "Last login", adjustWallet: "Adjust credits", features: "Cloud rollout", featureNames: { projects: "Projects", imageGeneration: "Images", videoGeneration: "Video", credits: "Credits" }, disable: "Disable", restore: "Restore", disableConfirm: "Disable this account and revoke access?", restoreConfirm: "Restore this account?", addChannel: "Add channel", channel: "Channel", capabilities: "Capabilities", credential: "Credential", rotateCredential: "Rotate credential", addModel: "Add model", deadline: "Release deadline", resolve: "Resolve", time: "Time", action: "Action", actor: "Actor", target: "Target", reason: "Reason", workspace: "Workspace", amount: "Credit amount", confirmLargeDebit: "Confirm a large debit", channelName: "Channel name", secret: "New secret", model: "Model", price: "Credits per job", concurrency: "Concurrency limit", providerIdempotency: "Provider supports idempotency", limitsJson: "Limits JSON", resolution: "Resolution", evidenceJson: "Evidence JSON", modals: { wallet: "Adjust credits", features: "Cloud rollout", channel: "Provider channel", credential: "Rotate credential", model: "Create model version", resolve: "Resolve unknown outcome" },
+    },
     modelAdapterErrors: {
         mismatch: "The selected model adapter does not support this model capability. Choose another adapter.",
         customScriptMissing: "Select and save a custom request script first.",
@@ -321,6 +328,8 @@ export default {
         video: "Video Studio",
         prompts: "Prompt Library",
         assets: "My Assets",
+        tasks: "Tasks",
+        admin: "Admin",
         config: "Settings",
     },
     topNav: {

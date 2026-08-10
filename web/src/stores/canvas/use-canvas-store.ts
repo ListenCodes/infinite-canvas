@@ -19,6 +19,13 @@ export type CanvasProject = {
     backgroundMode: CanvasBackgroundMode;
     showImageInfo: boolean;
     viewport: ViewportTransform;
+    cloud?: {
+        projectId: string;
+        version: number;
+        workspaceId: string;
+        userId: string;
+        conflictVersion?: number;
+    };
 };
 
 type CanvasStore = {
@@ -31,6 +38,8 @@ type CanvasStore = {
     deleteProjects: (ids: string[]) => void;
     replaceProjects: (projects: CanvasProject[]) => void;
     updateProject: (id: string, patch: Partial<Pick<CanvasProject, "nodes" | "connections" | "chatSessions" | "activeChatId" | "backgroundMode" | "showImageInfo" | "viewport">>) => void;
+    setCloudBinding: (id: string, cloud: CanvasProject["cloud"]) => void;
+    upsertCloudProject: (project: CanvasProject) => void;
 };
 
 const initialViewport: ViewportTransform = { x: 0, y: 0, k: 1 };
@@ -119,6 +128,10 @@ export const useCanvasStore = create<CanvasStore>()(
                 set((state) => ({
                     projects: state.projects.map((project) => (project.id === id ? { ...project, ...patch, updatedAt: new Date().toISOString() } : project)),
                 })),
+            setCloudBinding: (id, cloud) =>
+                set((state) => ({ projects: state.projects.map((project) => (project.id === id ? { ...project, cloud } : project)) })),
+            upsertCloudProject: (project) =>
+                set((state) => ({ projects: state.projects.some((item) => item.id === project.id) ? state.projects.map((item) => (item.id === project.id ? project : item)) : [project, ...state.projects] })),
         }),
         {
             name: CANVAS_STORE_KEY,

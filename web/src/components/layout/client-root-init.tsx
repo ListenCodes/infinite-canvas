@@ -5,6 +5,9 @@ import { useTranslation } from "react-i18next";
 
 import { createModelChannel, useConfigStore } from "@/stores/use-config-store";
 import { usePromptSourceScheduler } from "@/hooks/use-prompt-source-scheduler";
+import { useCloudSession } from "@/hooks/use-cloud-session";
+import { AuthDialog } from "@/components/layout/auth-dialog";
+import { useCloudProjectsBootstrap } from "@/pages/canvas/hooks/use-cloud-project-sync";
 
 export function ClientRootInit({ children }: { children: ReactNode }) {
     const { message } = App.useApp();
@@ -15,6 +18,8 @@ export function ClientRootInit({ children }: { children: ReactNode }) {
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
 
     usePromptSourceScheduler();
+    useCloudSession();
+    useCloudProjectsBootstrap();
 
     useEffect(() => {
         if (handledConfigParams.current) return;
@@ -49,5 +54,5 @@ export function ClientRootInit({ children }: { children: ReactNode }) {
         message.success(t("config.importedDirectConfig"));
     }, [config.channels, message, openConfigDialog, t, updateConfig]);
 
-    return <>{children}</>;
+    return <>{children}<AuthDialog /></>;
 }
