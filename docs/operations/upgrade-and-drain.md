@@ -91,9 +91,10 @@ compose "$candidate_env" up -d --no-deps worker-new
 compose "$candidate_env" up -d --no-deps api
 ```
 
-`drain.env.example`, `drain.handoff.env.example`, and
-`drain.candidate.env.example` are the prepared, zero-owner, and candidate-owner
-templates respectively. Never concatenate them with the runtime env: later duplicate
+`drain.env.example`, `drain.handoff.env.example`,
+`drain.candidate.env.example`, and `drain.rollback.env.example` are the prepared,
+zero-owner, candidate-owner, and previous-owner completion templates respectively.
+Never concatenate them with the runtime env: later duplicate
 keys are hard to audit. Compose must receive both files with ordered `--env-file`
 arguments so the drain state overrides `GENERATION_WRITES_ENABLED` explicitly.
 

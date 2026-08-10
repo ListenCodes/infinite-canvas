@@ -101,6 +101,19 @@ async function validateDrainEnvironment(lines, allowZeroOwners = false) {
   }
 }
 
+function parseEnvironment(content) {
+  return Object.fromEntries(
+    content
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith("#"))
+      .map((line) => {
+        const separator = line.indexOf("=");
+        return [line.slice(0, separator), line.slice(separator + 1)];
+      }),
+  );
+}
+
 test("release manifest binds three multi-architecture images to the source commit", async () => {
   const result = await validate(releaseManifest());
   assert.equal(result.status, 0, result.stderr);
@@ -611,12 +624,37 @@ test("release gate renders every drain handoff state with both environment files
     "drain.env.example",
     "drain.handoff.env.example",
     "drain.candidate.env.example",
+    "drain.rollback.env.example",
   ])
     assert.match(parseStep.run, new RegExp(state.replaceAll(".", "\\.")));
   assert.match(
     parseStep.run,
     /--env-file "infra\/compose\/\$\{topology\}\/\$\{state\}"/,
   );
+});
+
+test("rollback runbook performs a reverse zero-owner handoff before reopening writes", async () => {
+  const content = await readFile(
+    resolve(repository, "docs/operations/rollback.md"),
+    "utf8",
+  );
+  const pauseApi = content.indexOf('compose "$handoff_env" up -d --no-deps api');
+  const stopCandidate = content.indexOf('compose "$handoff_env" up -d --no-deps worker-new');
+  const startPrevious = content.indexOf('compose "$rollback_env" up -d --no-deps worker');
+  const reopenApi = content.indexOf('compose "$rollback_env" up -d --no-deps api');
+  assert.ok(pauseApi >= 0 && stopCandidate > pauseApi && startPrevious > stopCandidate && reopenApi > startPrevious);
+  assert.doesNotMatch(content, /up -d --no-deps worker(?:-new)? worker(?:-new)?/);
+
+  for (const topology of ["cloud", "oss"]) {
+    const rollback = parseEnvironment(
+      await readFile(resolve(repository, `infra/compose/${topology}/drain.rollback.env.example`), "utf8"),
+    );
+    assert.equal(rollback.GENERATION_WRITES_ENABLED, "true");
+    assert.equal(rollback.WORKER_OLD_DISPATCHER_ENABLED, "true");
+    assert.equal(rollback.WORKER_NEW_DISPATCHER_ENABLED, "false");
+    assert.equal(rollback.WORKER_OLD_RECONCILER_ENABLED, "true");
+    assert.equal(rollback.WORKER_NEW_RECONCILER_ENABLED, "false");
+  }
 });
 
 test("release gate scans all browser storage layers with exact platform canaries", async () => {

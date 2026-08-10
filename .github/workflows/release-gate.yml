@@ -135,7 +135,7 @@ jobs:
           for topology in cloud oss; do
             profiles=()
             if [[ "$topology" == oss ]]; then profiles=(--profile application); fi
-            for state in drain.env.example drain.handoff.env.example drain.candidate.env.example; do
+            for state in drain.env.example drain.handoff.env.example drain.candidate.env.example drain.rollback.env.example; do
               docker compose \
                 --env-file "infra/compose/${topology}/.env.example" \
                 --env-file "infra/compose/${topology}/${state}" \

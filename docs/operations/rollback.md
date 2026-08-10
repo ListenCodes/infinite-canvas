@@ -20,6 +20,50 @@ execution.
 5. Re-enable creation gradually and verify one image, one video, cancel, retry,
    unknown reconciliation, SSE reconnect, and wallet invariants.
 
+### Reverse Worker owner handoff
+
+The rollback is not complete until the previous Worker is the sole dispatcher and
+reconciler owner. Use the same Compose project, base file, drain override, and runtime
+env that were used for the forward handoff. For OSS add `--profile application` to
+each Compose command.
+
+```bash
+compose_dir=infra/compose/cloud
+runtime_env=/run/infinite-canvas/cloud.env
+handoff_env=/run/infinite-canvas/drain.handoff.env
+rollback_env=/run/infinite-canvas/drain.rollback.env
+
+compose() {
+  local drain_env="$1"
+  shift
+  docker compose --project-name infinite-canvas-cloud \
+    --env-file "$runtime_env" --env-file "$drain_env" \
+    -f "$compose_dir/compose.yaml" -f "$compose_dir/drain.override.yaml" \
+    "$@"
+}
+
+# First close the server-side write gate and prove all three write paths return 503.
+compose "$handoff_env" up -d --no-deps api
+
+# Disable only the candidate owners, then prove dispatcher=0 and reconciler=0.
+node scripts/validate-deployment-config.mjs --allow-zero-drain-owners \
+  --env-file "$handoff_env"
+compose "$handoff_env" up -d --no-deps worker-new
+
+# Enable only the previous owners while the API remains paused.
+node scripts/validate-deployment-config.mjs --env-file "$rollback_env"
+compose "$rollback_env" up -d --no-deps worker
+
+# Restore the previous API/workflow route, verify the old owners are unique, and only
+# then reopen generation writes.
+compose "$rollback_env" up -d --no-deps api
+```
+
+Do not recreate `worker` and `worker-new` in one command during this handoff. Record
+the observed zero-owner interval, the unique previous owners, and the first accepted
+post-rollback request. The API must remain on the handoff env until the old route and
+owners have both been verified.
+
 ## Data rules
 
 - Ledger entries are append-only. Never reverse them by update/delete; use an
