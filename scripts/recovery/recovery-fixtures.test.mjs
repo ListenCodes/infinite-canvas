@@ -425,12 +425,13 @@ test("recovery topology isolates the Hatchet observer from application data and 
   for (const required of ["business-db:", "hatchet-db:", "hatchet-lite:", "moto:", "recovery-audit:", "hatchet-terminal-observer:"]) {
     assert.ok(compose.includes(required), required);
   }
-  assert.deepEqual(parsed.services["business-db"].ports, [{ target: 5432, host_ip: "127.0.0.1", protocol: "tcp" }]);
-  assert.deepEqual(parsed.services["hatchet-db"].ports, [{ target: 5432, host_ip: "127.0.0.1", protocol: "tcp" }]);
-  assert.deepEqual(parsed.services.moto.ports, [{ target: 5000, host_ip: "127.0.0.1", protocol: "tcp" }]);
+  const dynamicLoopbackPort = (target) => ({ target, published: "49152-65535", host_ip: "127.0.0.1", protocol: "tcp" });
+  assert.deepEqual(parsed.services["business-db"].ports, [dynamicLoopbackPort(5432)]);
+  assert.deepEqual(parsed.services["hatchet-db"].ports, [dynamicLoopbackPort(5432)]);
+  assert.deepEqual(parsed.services.moto.ports, [dynamicLoopbackPort(5000)]);
   assert.deepEqual(parsed.services["hatchet-lite"].ports, [
-    { target: 8888, host_ip: "127.0.0.1", protocol: "tcp" },
-    { target: 8733, host_ip: "127.0.0.1", protocol: "tcp" },
+    dynamicLoopbackPort(8888),
+    dynamicLoopbackPort(8733),
   ]);
   assert.match(compose, /HATCHET_CLIENT_TOKEN_FILE: \/run\/secrets\/hatchet-client-token/);
   assert.match(compose, /source: recovery-hatchet-client-token/);
